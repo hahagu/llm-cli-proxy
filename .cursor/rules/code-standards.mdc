@@ -1,0 +1,72 @@
+---
+description: Code standards and best practices for writing clean, maintainable code
+alwaysApply: true
+---
+
+# Code Standards
+
+## General Principles
+
+- Write self-documenting code with clear variable and function names
+- Prefer composition over inheritance
+- Keep functions small and focused on a single responsibility
+- Avoid premature optimization; prioritize readability and maintainability
+- Follow the DRY (Don't Repeat Yourself) principle, but don't over-abstract
+
+## Vue/Nuxt Specific
+
+- Use Composition API with `<script setup>` syntax
+- Prefer `ref` for primitives and `reactive` for objects when appropriate
+- Use computed properties for derived state
+- Extract reusable logic into composables
+- Keep components focused and single-purpose
+- Use proper prop validation with TypeScript types
+- Prefer template refs over direct DOM manipulation
+
+## Naming Conventions
+
+- Use PascalCase for component names
+- Use camelCase for variables, functions, and composables
+- Convex modules must use camelCase file names (no dashes); module paths may only contain alphanumeric characters, underscores, or periods
+- Use SCREAMING_SNAKE_CASE for constants
+- Use kebab-case for file names (components, composables, utilities)
+- Prefix composables with `use` (e.g., `useAuth`, `useApi`)
+- Prefix utility functions with descriptive verbs (e.g., `formatDate`, `validateEmail`)
+
+## File Organization
+
+- One component per file
+- Co-locate related files (component, styles, tests) when appropriate
+- Group imports: external libraries, then internal modules, then types
+- Export types and interfaces from dedicated type files when shared
+
+## Error Handling
+
+- Always handle errors appropriately
+- Use try-catch blocks for async operations
+- Provide meaningful error messages
+- Log errors for debugging but don't expose sensitive information to users
+- Use proper error boundaries in Vue components
+
+## Performance
+
+- Use `v-memo` for expensive list rendering when appropriate
+- Lazy load components with `defineAsyncComponent` when beneficial
+- Avoid unnecessary reactivity with `shallowRef` or `markRaw` when appropriate
+- Use `v-once` for static content that never changes
+- Debounce or throttle expensive operations (user input, API calls)
+
+## Accessibility
+
+- Use semantic HTML elements
+- Provide proper ARIA labels when needed
+- Ensure keyboard navigation works correctly
+- Maintain proper focus management
+- Test with screen readers when possible
+
+## Comments and Documentation
+
+- Write comments that explain "why", not "what"
+- Use JSDoc comments for public APIs and complex functions
+- Keep comments up-to-date with code changes
+- Remove commented-out code before committing

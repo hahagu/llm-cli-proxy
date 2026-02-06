@@ -1,0 +1,82 @@
+---
+description: Testing standards and best practices for writing effective tests
+alwaysApply: true
+---
+
+# Testing Rules
+
+## Testing Framework
+
+- Use Vitest as the primary testing framework for Nuxt/Vue projects
+- Use Vue Test Utils for component testing
+- Use @vue/test-utils for Vue component testing utilities
+- Consider Playwright or Cypress for E2E testing when needed
+
+## Test Organization
+
+- Place test files next to the code they test (co-location) or in a `__tests__` directory
+- Use `.test.ts` or `.spec.ts` extensions for test files
+- Mirror the source directory structure in test directories
+- Group related tests using `describe` blocks
+- Use descriptive test names that explain what is being tested
+
+## Test Structure
+
+- Follow the AAA pattern: Arrange, Act, Assert
+- Keep tests focused and test one thing at a time
+- Use `it` or `test` for individual test cases
+- Use `beforeEach` and `afterEach` for setup and teardown
+- Clean up after tests (reset mocks, clear state, etc.)
+
+## Writing Tests
+
+- Write tests before or alongside implementation (TDD/BDD when possible)
+- Test behavior, not implementation details
+- Use meaningful assertions with clear error messages
+- Test edge cases and error conditions
+- Test user interactions, not internal state
+
+## Component Testing
+
+- Test component rendering and user interactions
+- Use `mount` for full component rendering or `shallowMount` for isolated testing
+- Test props, events, slots, and scoped slots
+- Mock external dependencies (API calls, composables, etc.)
+- Test accessibility features when applicable
+
+## Mocking and Stubs
+
+- Mock external API calls and services
+- Use Vitest's `vi.mock()` for module mocking
+- Create reusable mock factories for common data structures
+- Mock Nuxt composables when testing components in isolation
+- Use `vi.fn()` for function mocks and spies
+
+## Test Data
+
+- Use factories or builders for creating test data
+- Keep test data minimal and focused on what's being tested
+- Use realistic but simplified data
+- Avoid hardcoding values that might change
+
+## Coverage
+
+- Aim for meaningful coverage, not just high percentages
+- Focus on testing critical paths and business logic
+- Don't test framework internals or third-party libraries
+- Use coverage reports to identify untested code paths
+
+## Performance
+
+- Keep tests fast and independent
+- Avoid unnecessary async operations in tests
+- Use `vi.useFakeTimers()` for time-dependent tests
+- Parallelize tests when possible
+
+## Best Practices
+
+- Tests should be deterministic and repeatable
+- Avoid flaky tests; fix or remove them
+- Keep tests maintainable; refactor when they become brittle
+- Review and update tests when requirements change
+- Don't skip tests unless there's a good reason (document why)

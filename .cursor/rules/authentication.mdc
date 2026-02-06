@@ -1,0 +1,157 @@
+---
+description: Authentication system overview (Convex Auth), session storage/refresh, and the expected login flow behavior
+alwaysApply: true
+---
+
+# Authentication (Convex Auth)
+
+## Overview
+
+This project uses **Convex Auth** (`@convex-dev/auth`) on the backend (Convex) and a small client-side integration in Nuxt.
+
+We intentionally keep the client integration lightweight:
+
+- Convex handles identity/session issuance.
+- The Nuxt app stores the issued tokens and provides them to the Convex client.
+- The Nuxt app refreshes sessions using the refresh token before access tokens expire.
+
+## Key Files
+
+- Client auth state (token storage): `app/composables/useConvexAuth.ts`
+- Convex client wiring + refresh logic: `app/plugins/convex-auth.client.ts`
+- Login page (OAuth flow): `app/pages/login.vue`
+- Convex Auth provider configuration: `convex/auth.ts`
+- Convex Auth hosting configuration: `convex/auth.config.ts`
+- Convex HTTP routes for auth (OAuth callbacks, JWKS, etc.): `convex/http.ts`
+
+## Token & Storage Model
+
+`app/composables/useConvexAuth.ts` stores:
+
+- `token`: the **Convex access token** (JWT-like)
+- `refreshToken`: the **Convex refresh token**
+
+Storage location:
+
+- Browser: `localStorage` keys `convex_auth_token` and `convex_auth_refresh_token`
+- SSR: storage is not available; auth state is considered unauthenticated until hydrated
+
+Important constraints:
+
+- Only the shared composable should read/write these keys.
+- Components should call `setAuthState()` / `clearAuthState()` rather than writing storage directly.
+
+## How Convex Requests Are Authenticated
+
+`app/plugins/convex-auth.client.ts` calls `convex.setAuth(async () => token.value)`.
+
+That means:
+
+- Any Convex query/mutation/action will include the current access token.
+- When the token changes (login/refresh/logout), the plugin reconfigures auth via `onAuthChange()`.
+
+## Login Flow (app/pages/login.vue)
+
+The login page implements the OAuth flow using the Convex Auth `auth:signIn` action exposed as `api.auth.signIn`.
+
+### 1) Start OAuth
+
+When the user clicks "Continue with Google":
+
+- Call `convex.action(api.auth.signIn, { provider: "google", params: { redirectTo } })`.
+- If the result includes a `redirect` URL:
+  - Store `result.verifier` in `sessionStorage` under `convex_auth_verifier`.
+  - Set `window.location.href` to the `redirect` URL.
+
+Notes:
+
+- `redirectTo` is the absolute `https://.../login` URL, computed from `window.location.origin`.
+- `sessionStorage` is used for the PKCE verifier because it’s per-tab and short-lived.
+
+### 2) Handle callback on /login
+
+On return from Google, the browser lands back on `/login?code=...`.
+
+The page:
+
+- Detects `route.query.code`.
+- Reads the verifier from `sessionStorage`.
+- Calls `convex.action(api.auth.signIn, { params: { code, redirectTo }, verifier })`.
+- If `tokens.token` is returned:
+  - `setAuthState(tokens.token, { refreshToken: tokens.refreshToken })`
+  - Remove the verifier from `sessionStorage`
+  - Redirect to `/`
+
+### 3) Token redirect compatibility
+
+There is also a watcher for `route.query.token` (+ optional `route.query.refreshToken`).
+
+This supports alternative flows where tokens are delivered directly via query params.
+If you don’t need this flow, keep it anyway unless you’re sure no provider/route relies on it.
+
+### 4) Post-login navigation
+
+`login.vue` also watches `isAuthenticated` and redirects to `/` if already signed in.
+
+## Session Refresh (Required)
+
+Access tokens expire, so we must refresh using the refresh token.
+
+`app/plugins/convex-auth.client.ts` handles refresh:
+
+- Decodes the access token payload (JWT `exp`/`iat` if available).
+- Schedules a refresh before expiry.
+- Also refreshes opportunistically on:
+  - tab focus
+  - tab visibility change to `visible`
+
+Refresh call:
+
+- `convex.action(api.auth.signIn, { refreshToken })`
+- If new `tokens.token` is returned, it updates state with `setAuthState()`.
+- If refresh fails and the token is no longer valid, it clears local auth with `clearAuthState()`.
+
+Rules:
+
+- Components should not implement their own refresh timers.
+- Use the shared plugin logic so refresh is consistent and debounced (single in-flight refresh).
+
+## Sign Out
+
+The UI should sign out in two steps:
+
+1. Best-effort server sign out:
+   - `await convex.action(api.auth.signOut, {})`
+2. Always clear local auth:
+   - `await clearAuthState()`
+
+See how it is done in `app/pages/index.vue`.
+
+## Redirect & Environment Requirements
+
+Convex Auth validates redirects.
+
+Back end redirect handling lives in `convex/auth.ts` and allows:
+
+- `SITE_URL`
+- `CONVEX_SITE_URL`
+- localhost and 127.0.0.1
+- Additional patterns via `AUTH_ALLOWED_REDIRECTS`
+
+Google OAuth requires:
+
+- `AUTH_GOOGLE_ID`
+- `AUTH_GOOGLE_SECRET`
+
+## Implementation Guardrails
+
+- Do not call `convex.setAuth()` from components. Only the plugin should control it.
+- Do not store tokens anywhere except the shared auth composable.
+- Keep OAuth logic in `login.vue` (or a dedicated auth page) so the flow is centralized.
+- Any change to redirect URLs must be reflected in Convex Auth redirect allow-list logic.
+
+## Troubleshooting
+
+- "No tokens returned": often means the callback `code` exchange failed (bad verifier, wrong redirect URL, misconfigured OAuth app).
+- Frequent sign-outs: refresh token missing/cleared, or refresh failing and token already expired.
+- Works locally but not in prod: `SITE_URL` / allowed redirects mismatch or Google OAuth redirect URI mismatch.

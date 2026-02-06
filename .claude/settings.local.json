@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "mcp__tavily__tavily_extract",
+      "mcp__tavily__tavily_crawl",
+      "mcp__github__get_file_contents",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__query-docs",
+      "Bash(bun install:*)",
+      "Bash(bun pm info:*)",
+      "Bash(npm view:*)",
+      "Bash(python:*)",
+      "Bash(node -e:*)",
+      "Bash(del \"d:\\\\Documents\\\\Work\\\\stack\\\\scripts\\\\generate-jwks.js\")",
+      "Bash(bunx nuxt prepare:*)",
+      "Bash(NODE_OPTIONS=\"--stack-trace-limit=50\" bunx nuxt:*)",
+      "Bash(bun pm ls:*)",
+      "Bash(npm ls:*)",
+      "Bash(bun info:*)",
+      "Bash(powershell -Command:*)",
+      "mcp__tavily__tavily_search",
+      "Bash(git checkout:*)",
+      "Bash(npx convex:*)"
+    ]
+  }
+}

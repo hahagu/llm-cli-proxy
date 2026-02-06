@@ -1,0 +1,92 @@
+---
+description: Project standards for package management, documentation, Tailwind configuration, tech stack, and component development
+alwaysApply: true
+---
+
+# Project Rules
+
+## Package Manager
+
+- Always use `bun` or `bunx` as the package manager for all operations
+- Never use npm, yarn, or pnpm commands
+- When installing packages, use `bun add` or `bun add -d` for dev dependencies
+- When running scripts, use `bun run` or `bunx` for one-off commands
+
+## Documentation
+
+- Use context7 MCP server for documentation on various libraries
+- Always consult context7 documentation before implementing features with external libraries
+- Make use of context7 documentation whenever possible to ensure best practices
+
+## Tailwind CSS
+
+- Use Tailwind v4 directives (@theme, @layer, etc.) for configuration
+- Do NOT use or create a `tailwind.config.ts` file
+- Configure Tailwind through CSS directives in the stylesheet
+- Use Tailwind v4 syntax and features
+
+## Tech Stack
+
+- **Framework**: Nuxt v4
+- **Styling**: Tailwind v4
+- **UI Components**: Shadcn-vue
+- **Backend**: Convex
+
+## Path Aliases
+
+- `~~` or `@@` refers to the project root directory
+- `~` or `@` refers to the app folder (`app/`)
+- Use `~~/convex` (or `@@/convex`) when importing from the convex directory
+- Use `@/components`, `@/composables`, etc. for app-level imports
+- Example imports:
+  ```ts
+  import { api } from "~~/convex/_generated/api";
+  import { useAuth } from "@/composables/use-auth";
+  ```
+
+## Convex Organization
+
+- Separate queries, mutations, and actions into separate files within feature directories
+- Organize by feature/domain (e.g., `home/queries.ts`, `home/mutations.ts`, `home/actions.ts`)
+- Each directory should contain only the relevant function type files
+- Use descriptive directory names that reflect the domain or feature area
+- Use the `"use node"` directive at the top of files when using Node.js functions in Convex
+- Avoid creating `index.ts` files in directories
+- Example structure:
+  ```
+  convex/
+    home/
+      queries.ts
+      mutations.ts
+      actions.ts
+    users/
+      queries.ts
+      mutations.ts
+      actions.ts
+  ```
+
+## Nuxt Auto-imports
+
+- Always rely on Nuxt's auto-imports unless explicitly stated otherwise
+- Do NOT explicitly import Nuxt composables and utilities (e.g., `useRouter`, `useRoute`, `useState`, `navigateTo`, `useFetch`, etc.)
+- Use auto-imported functions directly without import statements
+- Only add explicit imports when specifically requested or when using non-auto-imported features
+
+## Component Development
+
+- Use shadcn-vue components whenever creating reusable components
+- If modifications to shadcn-vue components are necessary, create a variant instead of modifying the base component
+- Follow shadcn-vue patterns and conventions
+- Components should be placed in `app/components/ui/` following the existing structure
+
+## TypeScript
+
+- Always use strict types instead of `any`
+- Prefer explicit type definitions
+- Use proper type inference where appropriate
+
+## Code Style
+
+- Keep answers concise and direct
+- Prioritize technical details over generic advice
+- Follow existing code patterns in the repository
