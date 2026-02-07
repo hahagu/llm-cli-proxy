@@ -1,0 +1,18 @@
+services:
+  app:
+    build: .
+    expose:
+      - "3000"
+    environment:
+      - LLM_PROXY_URL_3000
+      - CONVEX_SELF_HOSTED_URL=${CONVEX_SELF_HOSTED_URL}
+      - VITE_CONVEX_SITE_URL=${VITE_CONVEX_SITE_URL}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - NODE_ENV=production
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s

@@ -1,255 +1,88 @@
 <template>
   <div class="bg-background text-foreground">
-    <div class="mx-auto flex min-h-screen max-w-5xl flex-col gap-8 px-6 py-12">
-      <header
-        class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"
+    <div class="mx-auto flex min-h-screen max-w-md items-center px-6 py-12">
+      <div v-if="authLoading" class="w-full text-center">
+        <div class="space-y-3">
+          <div class="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-muted border-t-primary" />
+          <p class="text-sm text-muted-foreground">Loading...</p>
+        </div>
+      </div>
+
+      <div
+        v-else-if="!isAuthenticated"
+        class="w-full space-y-8"
       >
-        <div class="space-y-1">
-          <p class="text-xs uppercase tracking-[0.25em] text-muted-foreground">
-            Starter
-          </p>
-          <h1 class="text-3xl font-semibold tracking-tight">
-            Nuxt + Convex Auth
-          </h1>
-          <p class="max-w-xl text-sm text-muted-foreground">
-            Sign in, confirm auth wiring works, and replace this view with your
-            app.
-          </p>
-        </div>
-        <div class="flex gap-2">
-          <NuxtLink
-            v-if="!isAuthenticated"
-            to="/login"
-            class="rounded-lg bg-foreground px-4 py-2 text-sm font-semibold text-background shadow-sm transition hover:opacity-90"
-          >
-            Sign in
-          </NuxtLink>
-          <button
-            v-else
-            class="rounded-lg border border-destructive px-4 py-2 text-sm font-semibold text-destructive transition hover:bg-destructive/10 disabled:cursor-not-allowed"
-            :disabled="isSigningOut"
-            @click="handleSignOut"
-          >
-            {{ isSigningOut ? "Signing out…" : "Sign out" }}
-          </button>
-        </div>
-      </header>
-
-      <section class="rounded-2xl border border-border bg-card p-8 shadow-sm">
-        <div v-if="authLoading" class="space-y-3 text-muted-foreground">
-          <p class="text-sm">Loading auth state…</p>
-          <div class="h-2 w-32 animate-pulse rounded bg-muted" />
-          <div class="h-2 w-48 animate-pulse rounded bg-muted" />
-        </div>
-
-        <div v-else-if="!isAuthenticated" class="space-y-4">
-          <h2 class="text-xl font-semibold text-foreground">
-            You are signed out
-          </h2>
-          <p class="text-sm text-muted-foreground">
-            Start Google OAuth. Tokens stay local; we fetch your profile when
-            you return.
-          </p>
-          <NuxtLink
-            to="/login"
-            class="inline-flex w-fit items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition hover:opacity-90"
-          >
-            Continue with Google
-          </NuxtLink>
-        </div>
-
-        <div v-else class="space-y-4">
-          <div
-            class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"
-          >
-            <div class="flex items-center gap-4">
-              <div
-                class="flex h-14 w-14 items-center justify-center overflow-hidden rounded-xl border border-border bg-muted"
-              >
-                <img
-                  v-if="user?.image"
-                  :src="user.image"
-                  alt="User avatar"
-                  class="h-full w-full object-cover"
-                />
-                <span
-                  v-else
-                  class="text-sm font-semibold text-muted-foreground"
-                >
-                  {{ userInitials }}
-                </span>
-              </div>
-              <div class="space-y-1">
-                <p
-                  class="text-xs uppercase tracking-[0.2em] text-muted-foreground"
-                >
-                  Signed in as
-                </p>
-                <p class="text-xl font-semibold text-foreground">
-                  {{ displayName }}
-                </p>
-                <p class="text-sm text-muted-foreground">{{ displayEmail }}</p>
-              </div>
-            </div>
+        <div class="space-y-3 text-center">
+          <div class="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
+            <Icon name="lucide:zap" class="h-7 w-7 text-primary" />
           </div>
-
-          <dl class="grid gap-3 sm:grid-cols-2">
-            <div class="rounded-xl border border-border bg-background p-4">
-              <dt
-                class="text-xs uppercase tracking-[0.15em] text-muted-foreground"
-              >
-                User id
-              </dt>
-              <dd class="mt-1 break-all font-mono text-sm text-foreground">
-                {{ userId }}
-              </dd>
-            </div>
-            <div class="rounded-xl border border-border bg-background p-4">
-              <dt
-                class="text-xs uppercase tracking-[0.15em] text-muted-foreground"
-              >
-                Email
-              </dt>
-              <dd class="mt-1 text-sm text-foreground">{{ displayEmail }}</dd>
-            </div>
-            <div class="rounded-xl border border-border bg-background p-4">
-              <dt
-                class="text-xs uppercase tracking-[0.15em] text-muted-foreground"
-              >
-                Verified
-              </dt>
-              <dd class="mt-1 text-sm text-foreground">
-                {{ emailVerified ? "Yes" : "Not verified" }}
-              </dd>
-            </div>
-            <div class="rounded-xl border border-border bg-background p-4">
-              <dt
-                class="text-xs uppercase tracking-[0.15em] text-muted-foreground"
-              >
-                Updated
-              </dt>
-              <dd class="mt-1 text-sm text-foreground">{{ updatedAtLabel }}</dd>
-            </div>
-            <div class="rounded-xl border border-border bg-background p-4">
-              <dt
-                class="text-xs uppercase tracking-[0.15em] text-muted-foreground"
-              >
-                Created
-              </dt>
-              <dd class="mt-1 text-sm text-foreground">{{ createdAtLabel }}</dd>
-            </div>
-          </dl>
+          <h1 class="text-3xl font-semibold tracking-tight">
+            LLM Proxy
+          </h1>
+          <p class="text-sm text-muted-foreground">
+            Route LLM requests across multiple providers with a unified API.
+          </p>
         </div>
-      </section>
+
+        <div class="space-y-4 rounded-2xl border border-border bg-card p-6 shadow-sm">
+          <button
+            class="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground shadow-sm transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="isLoading"
+            @click="startSignIn"
+          >
+            {{ isLoading ? "Redirecting..." : "Continue with Google" }}
+          </button>
+
+          <p v-if="errorMessage" class="text-center text-sm text-destructive">
+            {{ errorMessage }}
+          </p>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { useConvexClient } from "convex-vue";
-import { api } from "~~/convex/_generated/api";
 import { authClient } from "~/lib/auth-client";
 import { useConvexAuthState } from "@/composables/useConvexAuth";
 
-interface UserRecord {
-  _id?: string;
-  name?: string | null;
-  email?: string | null;
-  image?: string | null;
-  createdAt?: number | null;
-  updatedAt?: number | null;
-  emailVerified?: boolean | null;
+const router = useRouter();
+const route = useRoute();
+const { isAuthenticated, isLoading: authLoading } = useConvexAuthState();
+
+const isLoading = ref(false);
+const errorMessage = ref<string | null>(null);
+
+if (route.query.error) {
+  errorMessage.value = "Authentication failed. Please try again.";
 }
-
-const convex = useConvexClient();
-const { isAuthenticated, isLoading } = useConvexAuthState();
-
-const user = ref<UserRecord | null>(null);
-const isSigningOut = ref(false);
-const userLoading = ref(false);
-const authLoading = computed(() => isLoading.value || userLoading.value);
-
-const displayName = computed(
-  () => user.value?.name?.trim() || "Name unavailable"
-);
-const displayEmail = computed(
-  () => user.value?.email?.trim() || "Email unavailable"
-);
-const userId = computed(() => user.value?._id || "n/a");
-const emailVerified = computed(() => Boolean(user.value?.emailVerified));
-
-const formatDate = (timestamp?: number | null) => {
-  if (!timestamp) return "—";
-  try {
-    return new Intl.DateTimeFormat(undefined, {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    }).format(new Date(timestamp));
-  } catch {
-    return "—";
-  }
-};
-
-const createdAtLabel = computed(() =>
-  formatDate(user.value?.createdAt ?? null)
-);
-const updatedAtLabel = computed(() =>
-  formatDate(user.value?.updatedAt ?? null)
-);
-const userInitials = computed(() => {
-  const name = displayName.value;
-  if (!name || name === "Name unavailable") return "U";
-  return name
-    .split(" ")
-    .filter(Boolean)
-    .map((part) => part[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
-});
-
-const fetchUser = async () => {
-  if (isLoading.value) return;
-
-  if (!isAuthenticated.value) {
-    user.value = null;
-    return;
-  }
-
-  userLoading.value = true;
-  try {
-    const data = await convex.query(api.users.queries.currentUser, {});
-    user.value = (data as UserRecord | null) ?? null;
-  } catch (error) {
-    console.error("[index] Failed to fetch user:", error);
-    user.value = null;
-  } finally {
-    userLoading.value = false;
-  }
-};
-
-const handleSignOut = async () => {
-  if (isSigningOut.value) return;
-  isSigningOut.value = true;
-
-  try {
-    await authClient.signOut();
-  } catch (error) {
-    console.error("[index] Failed to sign out:", error);
-  } finally {
-    user.value = null;
-    isSigningOut.value = false;
-  }
-};
 
 watch(
   () => isAuthenticated.value,
-  () => {
-    void fetchUser();
+  (signedIn) => {
+    if (signedIn) {
+      router.replace("/dashboard");
+    }
   },
-  { immediate: true }
+  { immediate: true },
 );
+
+const startSignIn = async () => {
+  if (isLoading.value) return;
+  isLoading.value = true;
+  errorMessage.value = null;
+
+  try {
+    const origin = window.location.origin;
+    await authClient.signIn.social({
+      provider: "google",
+      callbackURL: `${origin}/dashboard`,
+      errorCallbackURL: `${origin}/?error=oauth_failed`,
+    });
+  } catch (error) {
+    console.error("[login] Failed to start sign in:", error);
+    errorMessage.value = "Unable to start the OAuth flow. Check credentials.";
+    isLoading.value = false;
+  }
+};
 </script>

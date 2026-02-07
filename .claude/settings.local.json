@@ -21,7 +21,23 @@
       "Bash(powershell -Command:*)",
       "mcp__tavily__tavily_search",
       "Bash(git checkout:*)",
-      "Bash(npx convex:*)"
+      "Bash(npx convex:*)",
+      "mcp__github__search_code",
+      "Bash(head:*)",
+      "Bash(python3:*)",
+      "Bash(npx nuxi build:*)",
+      "Bash(ls:*)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:docs.claude.com)",
+      "Bash(del \"server\\\\utils\\\\claude-code-oauth.ts\")",
+      "Bash(del \"server\\\\api\\\\dashboard\\\\claude-code-auth\\\\start.get.ts\")",
+      "Bash(del \"server\\\\api\\\\dashboard\\\\claude-code-auth\\\\disconnect.post.ts\")",
+      "Bash(del \"server\\\\api\\\\dashboard\\\\claude-code-status.get.ts\")",
+      "Bash(del \"server\\\\routes\\\\callback.get.ts\")",
+      "Bash(del \"convex\\\\schemas\\\\claudeCodeTokens.ts\")",
+      "Bash(del \"convex\\\\claudeCodeTokens\\\\queries.ts\")",
+      "Bash(del \"convex\\\\claudeCodeTokens\\\\mutations.ts\")",
+      "Bash(bun add:*)"
     ]
   }
 }

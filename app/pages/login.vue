@@ -57,7 +57,7 @@ watch(
   () => isAuthenticated.value,
   (signedIn) => {
     if (signedIn) {
-      router.replace("/");
+      router.replace("/dashboard");
     }
   },
   { immediate: true }
@@ -72,7 +72,7 @@ const startSignIn = async () => {
     const origin = window.location.origin;
     await authClient.signIn.social({
       provider: "google",
-      callbackURL: `${origin}/`,
+      callbackURL: `${origin}/dashboard`,
       errorCallbackURL: `${origin}/login?error=oauth_failed`,
     });
   } catch (error) {

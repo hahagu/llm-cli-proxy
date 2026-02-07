@@ -8,9 +8,24 @@
  * @module
  */
 
+import type * as apiKeys_mutations from "../apiKeys/mutations.js";
+import type * as apiKeys_queries from "../apiKeys/queries.js";
 import type * as auth from "../auth.js";
+import type * as claudeCodeTokens_mutations from "../claudeCodeTokens/mutations.js";
+import type * as claudeCodeTokens_queries from "../claudeCodeTokens/queries.js";
 import type * as http from "../http.js";
+import type * as providers_mutations from "../providers/mutations.js";
+import type * as providers_queries from "../providers/queries.js";
+import type * as schemas_apiKeys from "../schemas/apiKeys.js";
+import type * as schemas_claudeCodeTokens from "../schemas/claudeCodeTokens.js";
+import type * as schemas_providers from "../schemas/providers.js";
+import type * as schemas_systemPrompts from "../schemas/systemPrompts.js";
+import type * as schemas_usageLogs from "../schemas/usageLogs.js";
 import type * as schemas_users from "../schemas/users.js";
+import type * as systemPrompts_mutations from "../systemPrompts/mutations.js";
+import type * as systemPrompts_queries from "../systemPrompts/queries.js";
+import type * as usageLogs_mutations from "../usageLogs/mutations.js";
+import type * as usageLogs_queries from "../usageLogs/queries.js";
 import type * as users_queries from "../users/queries.js";
 
 import type {
@@ -20,9 +35,24 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  "apiKeys/mutations": typeof apiKeys_mutations;
+  "apiKeys/queries": typeof apiKeys_queries;
   auth: typeof auth;
+  "claudeCodeTokens/mutations": typeof claudeCodeTokens_mutations;
+  "claudeCodeTokens/queries": typeof claudeCodeTokens_queries;
   http: typeof http;
+  "providers/mutations": typeof providers_mutations;
+  "providers/queries": typeof providers_queries;
+  "schemas/apiKeys": typeof schemas_apiKeys;
+  "schemas/claudeCodeTokens": typeof schemas_claudeCodeTokens;
+  "schemas/providers": typeof schemas_providers;
+  "schemas/systemPrompts": typeof schemas_systemPrompts;
+  "schemas/usageLogs": typeof schemas_usageLogs;
   "schemas/users": typeof schemas_users;
+  "systemPrompts/mutations": typeof systemPrompts_mutations;
+  "systemPrompts/queries": typeof systemPrompts_queries;
+  "usageLogs/mutations": typeof usageLogs_mutations;
+  "usageLogs/queries": typeof usageLogs_queries;
   "users/queries": typeof users_queries;
 }>;
 

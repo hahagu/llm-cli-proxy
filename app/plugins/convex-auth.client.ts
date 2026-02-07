@@ -1,5 +1,6 @@
 import { useConvexClient } from "convex-vue";
 import { authClient } from "~/lib/auth-client";
+import { setSessionToken } from "~/utils/dashboard-fetch";
 
 export default defineNuxtPlugin(() => {
   const convex = useConvexClient();
@@ -53,8 +54,18 @@ export default defineNuxtPlugin(() => {
     }
   });
 
-  // Re-trigger setAuth when session changes so Convex picks up new tokens
+  // Keep the shared session token in sync for dashboardFetch
   const session = authClient.useSession();
+
+  watch(
+    () => session.value?.data?.session?.token,
+    (token) => {
+      setSessionToken((token as string) ?? null);
+    },
+    { immediate: true },
+  );
+
+  // Re-trigger setAuth when session changes so Convex picks up new tokens
   let lastSessionId: string | undefined;
 
   watch(
