@@ -32,7 +32,12 @@ export default defineEventHandler(async (event) => {
 
   // If a new API key is provided, encrypt it
   if (body.apiKey) {
-    const { encrypted, iv } = encrypt(body.apiKey);
+    // For Vertex AI, bundle apiKey + projectId + region into JSON
+    const credential = body.projectId
+      ? JSON.stringify({ apiKey: body.apiKey, projectId: body.projectId, region: body.region })
+      : body.apiKey;
+
+    const { encrypted, iv } = encrypt(credential);
     result.encryptedApiKey = encrypted;
     result.keyIv = iv;
   }

@@ -1,6 +1,7 @@
 import { getConvexClient } from "~~/server/utils/convex";
 import { decrypt } from "~~/server/utils/crypto";
 import { getAdapter } from "~~/server/utils/adapters";
+import { isConfiguredForUser, getAccessTokenForUser } from "~~/server/utils/claude-code-oauth";
 import { api } from "~~/convex/_generated/api";
 import type { OpenAIModelEntry } from "~~/server/utils/adapters/types";
 
@@ -18,26 +19,51 @@ export default defineEventHandler(async (event) => {
   }
 
   const convex = getConvexClient();
-  const providers = await convex.query(api.providers.queries.listByUserId, {
-    userId: keyData.userId,
-  });
+  const [providers, claudeCodeConfigured] = await Promise.all([
+    convex.query(api.providers.queries.listByUserId, {
+      userId: keyData.userId,
+    }),
+    isConfiguredForUser(keyData.userId),
+  ]);
 
   const allModels: OpenAIModelEntry[] = [];
   const warnings: string[] = [];
 
   const providerTypes = providers.map((p) => p.type);
+  if (claudeCodeConfigured) {
+    providerTypes.unshift("claude-code");
+  }
 
-  const results = await Promise.allSettled(
-    providers.map(async (provider) => {
-      const apiKey = decrypt(provider.encryptedApiKey, provider.keyIv);
-      const adapter = getAdapter(provider.type);
-      return { type: provider.type, models: await adapter.listModels(apiKey) };
-    }),
-  );
+  // Build fetch tasks: Claude Code OAuth + providers table entries
+  const fetchTasks: Array<Promise<{ type: string; models: OpenAIModelEntry[] }>> = [];
+
+  if (claudeCodeConfigured) {
+    fetchTasks.push(
+      (async () => {
+        const token = await getAccessTokenForUser(keyData.userId);
+        const adapter = getAdapter("claude-code");
+        return { type: "claude-code", models: await adapter.listModels(token) };
+      })(),
+    );
+  }
+
+  for (const provider of providers) {
+    fetchTasks.push(
+      (async () => {
+        const apiKey = decrypt(provider.encryptedApiKey, provider.keyIv);
+        const adapter = getAdapter(provider.type);
+        return { type: provider.type, models: await adapter.listModels(apiKey) };
+      })(),
+    );
+  }
+
+  const results = await Promise.allSettled(fetchTasks);
 
   for (let i = 0; i < results.length; i++) {
     const result = results[i]!;
-    const type = providerTypes[i];
+    const type = claudeCodeConfigured
+      ? (i === 0 ? "claude-code" : providers[i - 1]!.type)
+      : providers[i]!.type;
     if (result.status === "fulfilled") {
       allModels.push(...result.value.models);
     } else {

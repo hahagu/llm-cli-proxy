@@ -29,8 +29,17 @@ export default defineEventHandler(async (event) => {
 
   const body = parsed.data;
 
-  // Encrypt the provider API key
-  const { encrypted, iv } = encrypt(body.apiKey);
+  if (body.type === "vertex-ai" && !body.projectId) {
+    setResponseStatus(event, 400);
+    return { error: "projectId is required for Vertex AI" };
+  }
+
+  // For Vertex AI, bundle apiKey + projectId + region into JSON before encrypting
+  const credential = body.type === "vertex-ai"
+    ? JSON.stringify({ apiKey: body.apiKey, projectId: body.projectId, region: body.region })
+    : body.apiKey;
+
+  const { encrypted, iv } = encrypt(credential);
 
   return {
     encryptedApiKey: encrypted,

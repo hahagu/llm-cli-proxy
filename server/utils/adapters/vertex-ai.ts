@@ -5,7 +5,6 @@ import type {
   OpenAIModelEntry,
 } from "./types";
 import { generateId, nowUnix } from "./types";
-import { getAccessToken } from "../google-auth";
 import {
   buildGeminiRequest,
   translateGeminiResponse,
@@ -14,7 +13,32 @@ import {
   type GeminiResponse,
 } from "./gemini";
 
-const VERTEX_AI_REGION = process.env.VERTEX_AI_REGION || "asia-northeast1";
+const DEFAULT_REGION = "asia-northeast1";
+
+interface VertexCredentials {
+  apiKey: string;
+  projectId: string;
+  region: string;
+}
+
+function parseCredentials(credential: string): VertexCredentials {
+  try {
+    const parsed = JSON.parse(credential);
+    if (!parsed.apiKey || !parsed.projectId) {
+      throw new Error("Missing apiKey or projectId");
+    }
+    return {
+      apiKey: parsed.apiKey,
+      projectId: parsed.projectId,
+      region: parsed.region || DEFAULT_REGION,
+    };
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      throw new Error("Invalid Vertex AI credentials: expected JSON with apiKey and projectId");
+    }
+    throw err;
+  }
+}
 
 function vertexBase(region: string, projectId: string): string {
   return `https://${region}-aiplatform.googleapis.com/v1beta1/projects/${projectId}/locations/${region}`;
@@ -23,25 +47,17 @@ function vertexBase(region: string, projectId: string): string {
 export class VertexAiAdapter implements ProviderAdapter {
   readonly name = "vertex-ai";
 
-  private async auth(serviceAccountJson: string) {
-    const { token, projectId } = await getAccessToken(serviceAccountJson);
-    return { token, projectId, region: VERTEX_AI_REGION };
-  }
-
   async complete(
     request: OpenAIChatRequest,
     providerApiKey: string,
   ): Promise<OpenAIChatResponse> {
-    const { token, projectId, region } = await this.auth(providerApiKey);
+    const { apiKey, projectId, region } = parseCredentials(providerApiKey);
     const geminiReq = buildGeminiRequest(request);
-    const url = `${vertexBase(region, projectId)}/publishers/google/models/${request.model}:generateContent`;
+    const url = `${vertexBase(region, projectId)}/publishers/google/models/${request.model}:generateContent?key=${apiKey}`;
 
     const resp = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(geminiReq),
     });
 
@@ -58,17 +74,14 @@ export class VertexAiAdapter implements ProviderAdapter {
     request: OpenAIChatRequest,
     providerApiKey: string,
   ): Promise<ReadableStream<string>> {
-    const { token, projectId, region } = await this.auth(providerApiKey);
+    const { apiKey, projectId, region } = parseCredentials(providerApiKey);
     const geminiReq = buildGeminiRequest(request);
-    const url = `${vertexBase(region, projectId)}/publishers/google/models/${request.model}:streamGenerateContent?alt=sse`;
+    const url = `${vertexBase(region, projectId)}/publishers/google/models/${request.model}:streamGenerateContent?alt=sse&key=${apiKey}`;
     const requestId = generateId();
 
     const resp = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(geminiReq),
     });
 
@@ -87,12 +100,10 @@ export class VertexAiAdapter implements ProviderAdapter {
   }
 
   async listModels(providerApiKey: string): Promise<OpenAIModelEntry[]> {
-    const { token, region } = await this.auth(providerApiKey);
-    const url = `https://${region}-aiplatform.googleapis.com/v1beta1/publishers/google/models`;
+    const { apiKey, region } = parseCredentials(providerApiKey);
+    const url = `https://${region}-aiplatform.googleapis.com/v1beta1/publishers/google/models?key=${apiKey}`;
 
-    const resp = await fetch(url, {
-      headers: { "Authorization": `Bearer ${token}` },
-    });
+    const resp = await fetch(url);
 
     if (!resp.ok) {
       const body = await resp.text();
