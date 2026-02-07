@@ -1,6 +1,7 @@
 import { executeProxyRequest } from "~~/server/utils/proxy-core";
 import type { OpenAIChatRequest } from "~~/server/utils/adapters/types";
 import { chatCompletionRequestSchema } from "~~/server/utils/validation";
+import { OpenAIError } from "~~/server/utils/errors";
 
 export default defineEventHandler(async (event) => {
   const keyData = event.context.apiKeyData;
@@ -64,6 +65,10 @@ export default defineEventHandler(async (event) => {
 
     return result.data;
   } catch (err) {
+    if (err instanceof OpenAIError) {
+      setResponseStatus(event, err.statusCode);
+      return err.toResponse();
+    }
     const message = err instanceof Error ? err.message : "Internal server error";
     setResponseStatus(event, 502);
     return {
@@ -71,6 +76,7 @@ export default defineEventHandler(async (event) => {
         message,
         type: "server_error",
         code: "all_providers_failed",
+        param: null,
       },
     };
   }

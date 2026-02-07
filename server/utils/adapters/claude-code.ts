@@ -2,10 +2,15 @@ import type {
   ProviderAdapter,
   OpenAIChatRequest,
   OpenAIChatResponse,
+  OpenAIMessage,
   OpenAIModelEntry,
   OpenAIStreamChunk,
+  OpenAIToolCall,
+  OpenAITool,
 } from "./types";
 import { generateId, nowUnix } from "./types";
+import { randomUUID } from "crypto";
+import { mapProviderHttpError, providerError, invalidRequest } from "../errors";
 
 /**
  * Claude Code adapter using the official Claude Agent SDK.
@@ -33,7 +38,7 @@ const SYSTEM_PROMPT_NEUTRALIZER =
   "Important context: you are deployed as a general-purpose assistant " +
   "through an API proxy. The platform identifier above is only a " +
   "transport label and does not describe your capabilities or personality. " +
-  "You do not have access to any tools, file system, terminal, code " +
+  "You do not have access to any file system, terminal, code " +
   "execution, web browsing, or agentic features in this environment. " +
   "Your role is defined solely by the instructions that follow.\n\n";
 
@@ -51,6 +56,254 @@ function extractTextContent(
     .filter((p) => p.type === "text")
     .map((p) => (p as { text: string }).text)
     .join("\n");
+}
+
+/** Check if any user message contains image content parts. */
+function hasImageContent(messages: OpenAIMessage[]): boolean {
+  return messages.some(
+    (msg) =>
+      msg.role === "user" &&
+      Array.isArray(msg.content) &&
+      msg.content.some((part) => part.type === "image_url"),
+  );
+}
+
+/** Convert OpenAI content parts to Anthropic content blocks (text + images). */
+function convertToAnthropicBlocks(
+  content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> | null,
+): Array<Record<string, unknown>> {
+  if (typeof content === "string") return [{ type: "text", text: content }];
+  if (!content) return [{ type: "text", text: "" }];
+
+  const blocks: Array<Record<string, unknown>> = [];
+  for (const part of content) {
+    if (part.type === "text" && part.text) {
+      blocks.push({ type: "text", text: part.text });
+    } else if (part.type === "image_url" && part.image_url) {
+      const url = part.image_url.url;
+      if (url.startsWith("data:")) {
+        const match = url.match(/^data:([^;]+);base64,(.+)$/);
+        if (match) {
+          blocks.push({
+            type: "image",
+            source: { type: "base64", media_type: match[1], data: match[2] },
+          });
+        }
+      } else {
+        blocks.push({
+          type: "image",
+          source: { type: "url", url },
+        });
+      }
+    }
+  }
+  return blocks.length > 0 ? blocks : [{ type: "text", text: "" }];
+}
+
+/**
+ * Build prompt data for multimodal messages (images present).
+ * Conversation history is folded into the system prompt.
+ * The last user message is returned as Anthropic content blocks.
+ */
+function convertMessagesMultimodal(request: OpenAIChatRequest): {
+  systemPrompt: string | undefined;
+  lastUserBlocks: Array<Record<string, unknown>>;
+} {
+  let systemPrompt = "";
+  const historyParts: string[] = [];
+
+  // Find last user message index
+  let lastUserIdx = -1;
+  for (let i = request.messages.length - 1; i >= 0; i--) {
+    if (request.messages[i]?.role === "user") {
+      lastUserIdx = i;
+      break;
+    }
+  }
+
+  for (let i = 0; i < request.messages.length; i++) {
+    const msg = request.messages[i]!;
+
+    if (msg.role === "system") {
+      const text = extractTextContent(msg.content);
+      systemPrompt = systemPrompt ? `${systemPrompt}\n${text}` : text;
+      continue;
+    }
+
+    // Skip the last user message — it becomes the multimodal prompt
+    if (i === lastUserIdx) continue;
+
+    const text = extractTextContent(msg.content);
+    switch (msg.role) {
+      case "user":
+        historyParts.push(`User: ${text}`);
+        break;
+      case "assistant": {
+        let content = text;
+        if (msg.tool_calls?.length) {
+          const calls = msg.tool_calls
+            .map(
+              (tc) =>
+                `[Tool Call: ${tc.function.name}(${tc.function.arguments})]`,
+            )
+            .join("\n");
+          content = content ? `${content}\n${calls}` : calls;
+        }
+        historyParts.push(`Assistant: ${content}`);
+        break;
+      }
+      case "tool":
+        historyParts.push(`Tool Result (${msg.tool_call_id}): ${text}`);
+        break;
+    }
+  }
+
+  // Fold history into the system prompt so it's not lost
+  if (historyParts.length > 0) {
+    const history =
+      "Conversation history:\n" + historyParts.join("\n\n");
+    systemPrompt = systemPrompt
+      ? `${systemPrompt}\n\n${history}`
+      : history;
+  }
+
+  const lastMsg = request.messages[lastUserIdx];
+  const lastUserBlocks = lastMsg
+    ? convertToAnthropicBlocks(lastMsg.content)
+    : [{ type: "text", text: "" }];
+
+  return {
+    systemPrompt: systemPrompt || undefined,
+    lastUserBlocks,
+  };
+}
+
+/** Create an AsyncIterable that yields a single SDKUserMessage with multimodal content. */
+function createMultimodalPrompt(
+  contentBlocks: Array<Record<string, unknown>>,
+): AsyncIterable<Record<string, unknown>> {
+  const sessionId = randomUUID();
+  return {
+    [Symbol.asyncIterator]() {
+      let done = false;
+      return {
+        async next() {
+          if (done) return { value: undefined, done: true };
+          done = true;
+          return {
+            value: {
+              type: "user",
+              message: { role: "user", content: contentBlocks },
+              parent_tool_use_id: null,
+              session_id: sessionId,
+            },
+            done: false,
+          };
+        },
+      };
+    },
+  };
+}
+
+// --- Prompt-based tool calling ---
+
+/** Build a system prompt suffix describing available tools. */
+function buildToolPrompt(tools: OpenAITool[], toolChoice: OpenAIChatRequest["tool_choice"]): string {
+  if (toolChoice === "none" || !tools.length) return "";
+
+  const toolDescriptions = tools.map((t) => {
+    const params = t.function.parameters
+      ? JSON.stringify(t.function.parameters)
+      : "{}";
+    const desc = t.function.description ? ` - ${t.function.description}` : "";
+    return `- ${t.function.name}(parameters: ${params})${desc}`;
+  }).join("\n");
+
+  let instruction = `
+
+You have access to the following tools. When you decide to call one or more tools, you MUST respond with ONLY a JSON code block in exactly this format (no other text before or after):
+
+\`\`\`json
+{"tool_calls":[{"function":{"name":"function_name","arguments":"{...}"}}]}
+\`\`\`
+
+The "arguments" value must be a JSON-encoded string of the function parameters.
+
+Available tools:
+${toolDescriptions}`;
+
+  if (toolChoice === "required") {
+    instruction += "\n\nYou MUST call at least one tool in your response.";
+  } else if (typeof toolChoice === "object" && toolChoice?.function?.name) {
+    instruction += `\n\nYou MUST call the tool "${toolChoice.function.name}" in your response.`;
+  }
+
+  return instruction;
+}
+
+/** Try to parse tool calls from the model's text response. */
+function parseToolCallsFromText(text: string): {
+  toolCalls: OpenAIToolCall[];
+  textContent: string;
+} | null {
+  // Match a JSON code block containing tool_calls
+  const jsonBlockMatch = text.match(/```json\s*\n?([\s\S]*?)\n?\s*```/);
+  if (!jsonBlockMatch) return null;
+
+  try {
+    const parsed = JSON.parse(jsonBlockMatch[1]!) as {
+      tool_calls?: Array<{
+        function: { name: string; arguments: string };
+      }>;
+    };
+
+    if (!parsed.tool_calls?.length) return null;
+
+    const toolCalls: OpenAIToolCall[] = parsed.tool_calls.map((tc) => ({
+      id: `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+      type: "function" as const,
+      function: {
+        name: tc.function.name,
+        arguments: typeof tc.function.arguments === "string"
+          ? tc.function.arguments
+          : JSON.stringify(tc.function.arguments),
+      },
+    }));
+
+    // Text content is everything outside the JSON block
+    const textContent = text
+      .replace(/```json\s*\n?[\s\S]*?\n?\s*```/, "")
+      .trim();
+
+    return { toolCalls, textContent };
+  } catch {
+    return null;
+  }
+}
+
+/** Validate unsupported parameters for Claude Code and return any prompt suffix. */
+function validateAndEnhanceRequest(request: OpenAIChatRequest): {
+  promptSuffix: string;
+  hasTools: boolean;
+} {
+  if (request.n && request.n > 1) {
+    throw invalidRequest("Parameter 'n' > 1 is not supported for claude-code models.", "n");
+  }
+
+  let promptSuffix = "";
+  const hasTools = !!(request.tools && request.tools.length > 0);
+
+  // Prompt-based tool calling
+  if (hasTools) {
+    promptSuffix += buildToolPrompt(request.tools!, request.tool_choice);
+  }
+
+  // JSON mode via prompt
+  if (request.response_format?.type === "json_object") {
+    promptSuffix += "\n\nYou must respond with valid JSON only. No other text.";
+  }
+
+  return { promptSuffix, hasTools };
 }
 
 function convertMessages(request: OpenAIChatRequest): {
@@ -139,6 +392,7 @@ function translateStopReason(
 function buildSdkOptions(
   request: OpenAIChatRequest,
   systemPrompt: string | undefined,
+  promptSuffix: string,
   oauthToken: string,
   streaming: boolean,
 ) {
@@ -153,8 +407,8 @@ function buildSdkOptions(
   // The SDK always prepends "You are Claude Code…" before our prompt.
   // We neutralize that identity first, then append the caller's prompt
   // (or a plain default) so it takes full precedence.
-  options.systemPrompt =
-    SYSTEM_PROMPT_NEUTRALIZER + (systemPrompt ?? DEFAULT_SYSTEM_PROMPT);
+  const base = systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+  options.systemPrompt = SYSTEM_PROMPT_NEUTRALIZER + base + promptSuffix;
 
   if (streaming) {
     options.includePartialMessages = true;
@@ -171,8 +425,18 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     providerApiKey: string,
   ): Promise<OpenAIChatResponse> {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const { promptSuffix, hasTools } = validateAndEnhanceRequest(request);
 
-    const { systemPrompt, prompt } = convertMessages(request);
+    const multimodal = hasImageContent(request.messages);
+    const { systemPrompt, prompt } = multimodal
+      ? (() => {
+          const r = convertMessagesMultimodal(request);
+          return {
+            systemPrompt: r.systemPrompt,
+            prompt: createMultimodalPrompt(r.lastUserBlocks),
+          };
+        })()
+      : convertMessages(request);
     const requestId = generateId();
 
     let resultText = "";
@@ -180,8 +444,8 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     let outputTokens = 0;
 
     for await (const message of query({
-      prompt,
-      options: buildSdkOptions(request, systemPrompt, providerApiKey, false),
+      prompt: prompt as string,
+      options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, false),
     })) {
       if (message.type === "assistant") {
         for (const block of message.message.content) {
@@ -197,10 +461,39 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           outputTokens = message.usage.output_tokens ?? 0;
         } else {
           const errors = (message as { errors?: string[] }).errors;
-          throw new Error(
+          throw providerError(
             `Claude Code error: ${errors?.join("; ") || message.subtype}`,
           );
         }
+      }
+    }
+
+    // Parse tool calls from model response if tools were provided
+    if (hasTools && resultText) {
+      const parsed = parseToolCallsFromText(resultText);
+      if (parsed && parsed.toolCalls.length > 0) {
+        return {
+          id: requestId,
+          object: "chat.completion",
+          created: nowUnix(),
+          model: request.model,
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: parsed.textContent || null,
+                tool_calls: parsed.toolCalls,
+              },
+              finish_reason: "tool_calls",
+            },
+          ],
+          usage: {
+            prompt_tokens: inputTokens,
+            completion_tokens: outputTokens,
+            total_tokens: inputTokens + outputTokens,
+          },
+        };
       }
     }
 
@@ -229,15 +522,32 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     providerApiKey: string,
   ): Promise<ReadableStream<string>> {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const { promptSuffix, hasTools } = validateAndEnhanceRequest(request);
 
-    const { systemPrompt, prompt } = convertMessages(request);
+    const multimodal = hasImageContent(request.messages);
+    const { systemPrompt, prompt } = multimodal
+      ? (() => {
+          const r = convertMessagesMultimodal(request);
+          return {
+            systemPrompt: r.systemPrompt,
+            prompt: createMultimodalPrompt(r.lastUserBlocks),
+          };
+        })()
+      : convertMessages(request);
     const requestId = generateId();
     const model = request.model;
+    const includeUsage = !!request.stream_options?.include_usage;
 
     const sdkQuery = query({
-      prompt,
-      options: buildSdkOptions(request, systemPrompt, providerApiKey, true),
+      prompt: prompt as string,
+      options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, true),
     });
+
+    // When tools are present, we buffer the full response and emit tool_calls
+    // at the end (since we need the complete text to parse the JSON block)
+    if (hasTools) {
+      return this._streamWithToolParsing(sdkQuery, requestId, model, includeUsage);
+    }
 
     return new ReadableStream<string>({
       async start(controller) {
@@ -298,16 +608,18 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                   model,
                   choices: [{ index: 0, delta: {}, finish_reason: stopReason }],
                 };
-                const usage = event.usage as
-                  | Record<string, number>
-                  | undefined;
-                if (usage) {
-                  chunk.usage = {
-                    prompt_tokens: usage.input_tokens ?? 0,
-                    completion_tokens: usage.output_tokens ?? 0,
-                    total_tokens:
-                      (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0),
-                  };
+                if (includeUsage) {
+                  const usage = event.usage as
+                    | Record<string, number>
+                    | undefined;
+                  if (usage) {
+                    chunk.usage = {
+                      prompt_tokens: usage.input_tokens ?? 0,
+                      completion_tokens: usage.output_tokens ?? 0,
+                      total_tokens:
+                        (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0),
+                    };
+                  }
                 }
                 controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
               }
@@ -319,7 +631,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
             if (message.type === "result" && message.subtype !== "success") {
               const errors = (message as { errors?: string[] }).errors;
-              throw new Error(
+              throw providerError(
                 `Claude Code error: ${errors?.join("; ") || message.subtype}`,
               );
             }
@@ -328,6 +640,154 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           if (!sentRole) {
             controller.enqueue("data: [DONE]\n\n");
           }
+          controller.close();
+        } catch (err) {
+          controller.error(err);
+        }
+      },
+    });
+  }
+
+  /**
+   * Stream with tool call parsing: buffer the full response, then emit
+   * either text chunks or tool_calls depending on whether the model
+   * output a tool call JSON block.
+   */
+  private _streamWithToolParsing(
+    sdkQuery: AsyncIterable<Record<string, unknown>>,
+    requestId: string,
+    model: string,
+    includeUsage = false,
+  ): ReadableStream<string> {
+    return new ReadableStream<string>({
+      async start(controller) {
+        try {
+          let resultText = "";
+          let inputTokens = 0;
+          let outputTokens = 0;
+
+          for await (const message of sdkQuery) {
+            const msg = message as { type: string; subtype?: string; message?: { content: Array<{ type: string; text?: string }> }; usage?: { input_tokens: number; output_tokens: number }; errors?: string[] };
+
+            if (msg.type === "assistant") {
+              for (const block of msg.message?.content ?? []) {
+                if (block.type === "text" && block.text) {
+                  resultText += block.text;
+                }
+              }
+            }
+
+            if (msg.type === "result") {
+              if (msg.subtype === "success") {
+                inputTokens = msg.usage?.input_tokens ?? 0;
+                outputTokens = msg.usage?.output_tokens ?? 0;
+              } else {
+                throw providerError(
+                  `Claude Code error: ${msg.errors?.join("; ") || msg.subtype}`,
+                );
+              }
+            }
+          }
+
+          const usage = {
+            prompt_tokens: inputTokens,
+            completion_tokens: outputTokens,
+            total_tokens: inputTokens + outputTokens,
+          };
+
+          // Try to parse tool calls from the buffered response
+          const parsed = parseToolCallsFromText(resultText);
+          if (parsed && parsed.toolCalls.length > 0) {
+            // Emit role chunk
+            const roleChunk: OpenAIStreamChunk = {
+              id: requestId,
+              object: "chat.completion.chunk",
+              created: nowUnix(),
+              model,
+              choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
+            };
+            controller.enqueue(`data: ${JSON.stringify(roleChunk)}\n\n`);
+
+            // Emit text content if any
+            if (parsed.textContent) {
+              const textChunk: OpenAIStreamChunk = {
+                id: requestId,
+                object: "chat.completion.chunk",
+                created: nowUnix(),
+                model,
+                choices: [{ index: 0, delta: { content: parsed.textContent }, finish_reason: null }],
+              };
+              controller.enqueue(`data: ${JSON.stringify(textChunk)}\n\n`);
+            }
+
+            // Emit tool calls
+            for (let i = 0; i < parsed.toolCalls.length; i++) {
+              const tc = parsed.toolCalls[i]!;
+              const toolChunk: OpenAIStreamChunk = {
+                id: requestId,
+                object: "chat.completion.chunk",
+                created: nowUnix(),
+                model,
+                choices: [{
+                  index: 0,
+                  delta: {
+                    tool_calls: [{
+                      index: i,
+                      id: tc.id,
+                      type: "function",
+                      function: { name: tc.function.name, arguments: tc.function.arguments },
+                    }],
+                  },
+                  finish_reason: null,
+                }],
+              };
+              controller.enqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
+            }
+
+            // Emit finish chunk with tool_calls reason
+            const finishChunk: OpenAIStreamChunk = {
+              id: requestId,
+              object: "chat.completion.chunk",
+              created: nowUnix(),
+              model,
+              choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+              ...(includeUsage ? { usage } : {}),
+            };
+            controller.enqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
+          } else {
+            // No tool calls found — emit the text as normal streaming chunks
+            const roleChunk: OpenAIStreamChunk = {
+              id: requestId,
+              object: "chat.completion.chunk",
+              created: nowUnix(),
+              model,
+              choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
+            };
+            controller.enqueue(`data: ${JSON.stringify(roleChunk)}\n\n`);
+
+            if (resultText) {
+              const textChunk: OpenAIStreamChunk = {
+                id: requestId,
+                object: "chat.completion.chunk",
+                created: nowUnix(),
+                model,
+                choices: [{ index: 0, delta: { content: resultText }, finish_reason: null }],
+              };
+              controller.enqueue(`data: ${JSON.stringify(textChunk)}\n\n`);
+            }
+
+            const finishChunk: OpenAIStreamChunk = {
+              id: requestId,
+              object: "chat.completion.chunk",
+              created: nowUnix(),
+              model,
+              choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+              ...(includeUsage ? { usage } : {}),
+            };
+            controller.enqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
+          }
+
+          controller.enqueue("data: [DONE]\n\n");
           controller.close();
         } catch (err) {
           controller.error(err);
@@ -350,7 +810,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
     if (!resp.ok) {
       const body = await resp.text();
-      throw new Error(`Anthropic models API error ${resp.status}: ${body}`);
+      throw mapProviderHttpError("Anthropic", resp.status, body);
     }
 
     const data = (await resp.json()) as {
@@ -358,7 +818,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     };
 
     if (!data.data || data.data.length === 0) {
-      throw new Error(
+      throw providerError(
         `Anthropic models API returned no models (response keys: ${Object.keys(data).join(", ")})`,
       );
     }

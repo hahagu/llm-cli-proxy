@@ -2,6 +2,7 @@ import { getConvexClient } from "~~/server/utils/convex";
 import { decrypt } from "~~/server/utils/crypto";
 import { getAdapter, getProviderDisplayPrefix } from "~~/server/utils/adapters";
 import { isConfiguredForUser, getAccessTokenForUser } from "~~/server/utils/claude-code-oauth";
+import { getCachedModels, setCachedModels } from "~~/server/utils/model-cache";
 import { api } from "~~/convex/_generated/api";
 import type { OpenAIModelEntry } from "~~/server/utils/adapters/types";
 
@@ -34,15 +35,19 @@ export default defineEventHandler(async (event) => {
     providerTypes.unshift("claude-code");
   }
 
-  // Build fetch tasks: Claude Code OAuth + providers table entries
+  // Build fetch tasks with cache: Claude Code OAuth + providers table entries
   const fetchTasks: Array<Promise<{ type: string; models: OpenAIModelEntry[] }>> = [];
 
   if (claudeCodeConfigured) {
     fetchTasks.push(
       (async () => {
+        const cached = getCachedModels(keyData.userId, "claude-code");
+        if (cached) return { type: "claude-code", models: cached };
         const token = await getAccessTokenForUser(keyData.userId);
         const adapter = getAdapter("claude-code");
-        return { type: "claude-code", models: await adapter.listModels(token) };
+        const models = await adapter.listModels(token);
+        setCachedModels(keyData.userId, "claude-code", models);
+        return { type: "claude-code", models };
       })(),
     );
   }
@@ -50,9 +55,13 @@ export default defineEventHandler(async (event) => {
   for (const provider of providers) {
     fetchTasks.push(
       (async () => {
+        const cached = getCachedModels(keyData.userId, provider.type);
+        if (cached) return { type: provider.type, models: cached };
         const apiKey = decrypt(provider.encryptedApiKey, provider.keyIv);
         const adapter = getAdapter(provider.type);
-        return { type: provider.type, models: await adapter.listModels(apiKey) };
+        const models = await adapter.listModels(apiKey);
+        setCachedModels(keyData.userId, provider.type, models);
+        return { type: provider.type, models };
       })(),
     );
   }

@@ -34,9 +34,18 @@ export default defineEventHandler(async (event) => {
     };
   }
 
-  if (!checkRateLimit(keyData.id, keyData.rateLimitPerMinute)) {
+  const rateResult = checkRateLimit(keyData.id, keyData.rateLimitPerMinute);
+
+  // Set rate limit headers on every response (when limits are configured)
+  if (rateResult.limit > 0) {
+    setHeader(event, "X-RateLimit-Limit", String(rateResult.limit));
+    setHeader(event, "X-RateLimit-Remaining", String(rateResult.remaining));
+    setHeader(event, "X-RateLimit-Reset", String(rateResult.resetAt));
+  }
+
+  if (!rateResult.allowed) {
     setResponseStatus(event, 429);
-    setHeader(event, "Retry-After", "60");
+    setHeader(event, "Retry-After", String(rateResult.resetAt - Math.ceil(Date.now() / 1000)));
     return {
       error: {
         message: "Rate limit exceeded. Try again later.",

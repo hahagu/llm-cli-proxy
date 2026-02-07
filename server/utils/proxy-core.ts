@@ -4,6 +4,7 @@ import { getAdapter, parseModelWithProvider } from "./adapters";
 import { getAccessTokenForUser, isConfiguredForUser } from "./claude-code-oauth";
 import { api, internal } from "~~/convex/_generated/api";
 import type { OpenAIChatRequest, OpenAIChatResponse } from "./adapters/types";
+import { OpenAIError, invalidRequest, providerError } from "./errors";
 
 export interface ProxyKeyData {
   id: string;
@@ -141,7 +142,7 @@ export async function executeProxyRequest(
   const parsed = parseModelWithProvider(requestWithPrompt.model);
   if (!parsed) {
     logUsage(keyData, "none", request.model, 400, Date.now() - startTime, undefined, "Unknown model provider");
-    throw new Error(`Cannot determine provider for model: ${request.model}`);
+    throw invalidRequest(`Cannot determine provider for model: ${request.model}`, "model");
   }
   const { provider: providerType, model: rawModel } = parsed;
 
@@ -151,7 +152,7 @@ export async function executeProxyRequest(
   const creds = await getProviderCredentials(keyData.userId, providerType);
   if (!creds) {
     logUsage(keyData, providerType, rawModel, 502, Date.now() - startTime, undefined, "No credentials configured");
-    throw new Error(`No credentials configured for provider ${providerType}`);
+    throw providerError(`No credentials configured for provider ${providerType}`);
   }
 
   try {
@@ -189,8 +190,13 @@ export async function executeProxyRequest(
       };
     }
   } catch (err) {
+    // Preserve structured OpenAIError instances from adapters
+    if (err instanceof OpenAIError) {
+      logUsage(keyData, providerType, rawModel, err.statusCode, Date.now() - startTime, undefined, err.message);
+      throw err;
+    }
     const safeError = sanitizeError(err);
     logUsage(keyData, providerType, rawModel, 502, Date.now() - startTime, undefined, safeError);
-    throw new Error(`Provider ${providerType} failed: ${safeError}`);
+    throw providerError(`Provider ${providerType} failed: ${safeError}`);
   }
 }

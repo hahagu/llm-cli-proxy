@@ -5,6 +5,7 @@ import type {
   OpenAIModelEntry,
 } from "./types";
 import { nowUnix } from "./types";
+import { mapProviderHttpError, providerError } from "../errors";
 
 const OPENROUTER_API_URL = "https://openrouter.ai/api/v1";
 
@@ -28,7 +29,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
 
     if (!resp.ok) {
       const errorBody = await resp.text();
-      throw new Error(`OpenRouter API error ${resp.status}: ${errorBody}`);
+      throw mapProviderHttpError("OpenRouter", resp.status, errorBody);
     }
 
     return (await resp.json()) as OpenAIChatResponse;
@@ -51,11 +52,11 @@ export class OpenRouterAdapter implements ProviderAdapter {
 
     if (!resp.ok) {
       const errorBody = await resp.text();
-      throw new Error(`OpenRouter API error ${resp.status}: ${errorBody}`);
+      throw mapProviderHttpError("OpenRouter", resp.status, errorBody);
     }
 
     if (!resp.body) {
-      throw new Error("No response body from OpenRouter API");
+      throw providerError("No response body from OpenRouter API");
     }
 
     // OpenRouter already returns OpenAI-format SSE, pipe through directly
@@ -99,7 +100,8 @@ export class OpenRouterAdapter implements ProviderAdapter {
     });
 
     if (!resp.ok) {
-      throw new Error(`OpenRouter models list error ${resp.status}`);
+      const body = await resp.text();
+      throw mapProviderHttpError("OpenRouter", resp.status, body);
     }
 
     const data = (await resp.json()) as {

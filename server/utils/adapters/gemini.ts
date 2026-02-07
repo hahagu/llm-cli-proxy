@@ -8,6 +8,7 @@ import type {
   OpenAIToolCall,
   OpenAIStreamChunk,
 } from "./types";
+import { mapProviderHttpError, providerError } from "../errors";
 import { generateId, nowUnix } from "./types";
 
 export const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
@@ -42,8 +43,16 @@ export interface GeminiRequest {
     maxOutputTokens?: number;
     stopSequences?: string[];
     responseMimeType?: string;
+    frequencyPenalty?: number;
+    presencePenalty?: number;
   };
   tools?: Array<{ functionDeclarations: GeminiFunctionDeclaration[] }>;
+  toolConfig?: {
+    functionCallingConfig: {
+      mode: "AUTO" | "ANY" | "NONE";
+      allowedFunctionNames?: string[];
+    };
+  };
 }
 
 function translateContentPart(part: OpenAIContentPart): GeminiPart {
@@ -160,6 +169,8 @@ export function buildGeminiRequest(req: OpenAIChatRequest): GeminiRequest {
   if (req.response_format?.type === "json_object") {
     genConfig.responseMimeType = "application/json";
   }
+  if (req.frequency_penalty !== undefined) genConfig.frequencyPenalty = req.frequency_penalty;
+  if (req.presence_penalty !== undefined) genConfig.presencePenalty = req.presence_penalty;
   if (Object.keys(genConfig).length > 0) {
     geminiReq.generationConfig = genConfig;
   }
@@ -172,6 +183,24 @@ export function buildGeminiRequest(req: OpenAIChatRequest): GeminiRequest {
         parameters: t.function.parameters,
       })),
     }];
+  }
+
+  // Map tool_choice to Gemini's toolConfig
+  if (req.tool_choice && req.tools && req.tools.length > 0) {
+    if (req.tool_choice === "none") {
+      geminiReq.toolConfig = { functionCallingConfig: { mode: "NONE" } };
+    } else if (req.tool_choice === "auto") {
+      geminiReq.toolConfig = { functionCallingConfig: { mode: "AUTO" } };
+    } else if (req.tool_choice === "required") {
+      geminiReq.toolConfig = { functionCallingConfig: { mode: "ANY" } };
+    } else if (typeof req.tool_choice === "object" && req.tool_choice.function?.name) {
+      geminiReq.toolConfig = {
+        functionCallingConfig: {
+          mode: "ANY",
+          allowedFunctionNames: [req.tool_choice.function.name],
+        },
+      };
+    }
   }
 
   return geminiReq;
@@ -267,6 +296,7 @@ export function translateGeminiResponse(
 export function createStreamTransformer(
   requestId: string,
   model: string,
+  includeUsage = false,
 ): TransformStream<string, string> {
   let sentRole = false;
 
@@ -344,7 +374,7 @@ export function createStreamTransformer(
             delta: {},
             finish_reason: finishReason,
           }],
-          usage: event.usageMetadata
+          usage: includeUsage && event.usageMetadata
             ? {
                 prompt_tokens: event.usageMetadata.promptTokenCount,
                 completion_tokens: event.usageMetadata.candidatesTokenCount,
@@ -405,7 +435,7 @@ export class GeminiAdapter implements ProviderAdapter {
 
     if (!resp.ok) {
       const errorBody = await resp.text();
-      throw new Error(`Gemini API error ${resp.status}: ${errorBody}`);
+      throw mapProviderHttpError("Gemini", resp.status, errorBody);
     }
 
     const data = (await resp.json()) as GeminiResponse;
@@ -428,16 +458,16 @@ export class GeminiAdapter implements ProviderAdapter {
 
     if (!resp.ok) {
       const errorBody = await resp.text();
-      throw new Error(`Gemini API error ${resp.status}: ${errorBody}`);
+      throw mapProviderHttpError("Gemini", resp.status, errorBody);
     }
 
     if (!resp.body) {
-      throw new Error("No response body from Gemini API");
+      throw providerError("No response body from Gemini API");
     }
 
     return resp.body
       .pipeThrough(createLineDecoder())
-      .pipeThrough(createStreamTransformer(requestId, request.model));
+      .pipeThrough(createStreamTransformer(requestId, request.model, !!request.stream_options?.include_usage));
   }
 
   async listModels(providerApiKey: string): Promise<OpenAIModelEntry[]> {
@@ -445,7 +475,7 @@ export class GeminiAdapter implements ProviderAdapter {
     const resp = await fetch(url);
     if (!resp.ok) {
       const body = await resp.text();
-      throw new Error(`Gemini models list error ${resp.status}: ${body}`);
+      throw mapProviderHttpError("Gemini", resp.status, body);
     }
     const data = (await resp.json()) as {
       models: Array<{ name: string; displayName: string }>;

@@ -6,6 +6,7 @@ import {
   type AnthropicInboundRequest,
 } from "~~/server/utils/adapters/anthropic-inbound";
 import { anthropicMessagesRequestSchema } from "~~/server/utils/validation";
+import { OpenAIError } from "~~/server/utils/errors";
 
 export default defineEventHandler(async (event) => {
   const keyData = event.context.apiKeyData;
@@ -102,6 +103,15 @@ export default defineEventHandler(async (event) => {
       },
     };
   } catch (err) {
+    if (err instanceof OpenAIError) {
+      const anthropicType =
+        err.statusCode === 401 ? "authentication_error"
+          : err.statusCode === 429 ? "rate_limit_error"
+            : err.statusCode === 400 ? "invalid_request_error"
+              : "api_error";
+      setResponseStatus(event, err.statusCode);
+      return { type: "error", error: { type: anthropicType, message: err.message } };
+    }
     const message =
       err instanceof Error ? err.message : "Internal server error";
     setResponseStatus(event, 502);

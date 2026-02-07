@@ -54,6 +54,7 @@ export interface OpenAIChatRequest {
   presence_penalty?: number;
   n?: number;
   user?: string;
+  stream_options?: { include_usage?: boolean };
 }
 
 // --- OpenAI Response Types ---
