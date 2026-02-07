@@ -6,14 +6,17 @@ import type { DataModel } from "./_generated/dataModel";
 import authConfig from "./auth.config";
 
 const siteUrl = process.env.SITE_URL!;
-const clientUrl = process.env.CLIENT_URL;
+const clientUrls = (process.env.CLIENT_URLS ?? "")
+  .split(",")
+  .map((url) => url.trim())
+  .filter(Boolean);
 
 export const authComponent = createClient<DataModel>(components.betterAuth);
 
 export const createAuth = (ctx: GenericCtx<DataModel>) =>
   betterAuth({
     baseURL: siteUrl,
-    trustedOrigins: [siteUrl, ...(clientUrl ? [clientUrl] : [])],
+    trustedOrigins: [siteUrl, ...clientUrls],
     database: authComponent.adapter(ctx),
     socialProviders: {
       google: {
