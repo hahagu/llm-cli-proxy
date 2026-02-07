@@ -446,7 +446,8 @@ export class GeminiAdapter implements ProviderAdapter {
     const url = `${GEMINI_API_BASE}/models?key=${providerApiKey}`;
     const resp = await fetch(url);
     if (!resp.ok) {
-      throw new Error(`Gemini models list error ${resp.status}`);
+      const body = await resp.text();
+      throw new Error(`Gemini models list error ${resp.status}: ${body}`);
     }
     const data = (await resp.json()) as {
       models: Array<{ name: string; displayName: string }>;

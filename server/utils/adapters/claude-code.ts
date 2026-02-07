@@ -354,10 +354,16 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     }
 
     const data = (await resp.json()) as {
-      data: Array<{ id: string; created_at?: string }>;
+      data?: Array<{ id: string; created_at?: string }>;
     };
 
-    return (data.data ?? []).map((m) => ({
+    if (!data.data || data.data.length === 0) {
+      throw new Error(
+        `Anthropic models API returned no models (response keys: ${Object.keys(data).join(", ")})`,
+      );
+    }
+
+    return data.data.map((m) => ({
       id: m.id,
       object: "model" as const,
       created: m.created_at
