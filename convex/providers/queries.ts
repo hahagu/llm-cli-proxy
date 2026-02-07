@@ -19,6 +19,7 @@ export const getByUserAndType = query({
     type: v.union(
       v.literal("claude-code"),
       v.literal("gemini"),
+      v.literal("vertex-ai"),
       v.literal("openrouter"),
     ),
   },

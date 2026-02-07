@@ -25,6 +25,8 @@ export default defineEventHandler(async (event) => {
   const allModels: OpenAIModelEntry[] = [];
   const warnings: string[] = [];
 
+  const providerTypes = providers.map((p) => p.type);
+
   const results = await Promise.allSettled(
     providers.map(async (provider) => {
       const apiKey = decrypt(provider.encryptedApiKey, provider.keyIv);
@@ -33,21 +35,24 @@ export default defineEventHandler(async (event) => {
     }),
   );
 
-  for (const result of results) {
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i]!;
+    const type = providerTypes[i];
     if (result.status === "fulfilled") {
       allModels.push(...result.value.models);
     } else {
       const msg = result.reason instanceof Error
         ? result.reason.message
         : String(result.reason);
-      console.warn(`[models] provider failed: ${msg}`);
-      warnings.push(msg);
+      console.warn(`[models] ${type} failed: ${msg}`);
+      warnings.push(`[${type}] ${msg}`);
     }
   }
 
   return {
     object: "list",
     data: allModels,
+    _providers: providerTypes,
     ...(warnings.length > 0 ? { _warnings: warnings } : {}),
   };
 });

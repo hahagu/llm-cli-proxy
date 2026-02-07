@@ -1,6 +1,6 @@
 import { getConvexClient } from "./convex";
 import { decrypt } from "./crypto";
-import { getAdapter, detectProviderFromModel } from "./adapters";
+import { getAdapter, detectProvidersFromModel } from "./adapters";
 import { getAccessTokenForUser, isConfiguredForUser } from "./claude-code-oauth";
 import { api, internal } from "~~/convex/_generated/api";
 import type { OpenAIChatRequest, OpenAIChatResponse } from "./adapters/types";
@@ -31,7 +31,7 @@ async function getProviderCredentials(
   const convex = getConvexClient();
   const provider = await convex.query(api.providers.queries.getByUserAndType, {
     userId,
-    type: providerType as "gemini" | "openrouter",
+    type: providerType as "gemini" | "vertex-ai" | "openrouter",
   });
   if (!provider) return null;
   try {
@@ -137,36 +137,47 @@ export async function executeProxyRequest(
   // Apply system prompt hierarchy for the requested model
   const requestWithPrompt = await applySystemPromptHierarchy(request, keyData.userId);
 
-  // Detect the provider from the model name
-  const detectedProvider = detectProviderFromModel(requestWithPrompt.model);
-  if (!detectedProvider) {
+  // Detect candidate providers from the model name
+  const candidates = detectProvidersFromModel(requestWithPrompt.model);
+  if (candidates.length === 0) {
     logUsage(keyData, "none", request.model, 400, Date.now() - startTime, undefined, "Unknown model provider");
     throw new Error(`Cannot determine provider for model: ${request.model}`);
   }
 
-  const creds = await getProviderCredentials(keyData.userId, detectedProvider);
-  if (!creds) {
-    logUsage(keyData, detectedProvider, request.model, 502, Date.now() - startTime, undefined, "No credentials configured");
-    throw new Error(`No credentials configured for provider: ${detectedProvider}`);
+  // Try each candidate until we find one with configured credentials
+  let resolvedProvider: string | null = null;
+  let creds: { apiKey: string } | null = null;
+  for (const candidate of candidates) {
+    creds = await getProviderCredentials(keyData.userId, candidate);
+    if (creds) {
+      resolvedProvider = candidate;
+      break;
+    }
+  }
+
+  if (!resolvedProvider || !creds) {
+    const tried = candidates.join(", ");
+    logUsage(keyData, candidates[0]!, request.model, 502, Date.now() - startTime, undefined, "No credentials configured");
+    throw new Error(`No credentials configured for model ${request.model} (tried: ${tried})`);
   }
 
   try {
-    const adapter = getAdapter(detectedProvider);
+    const adapter = getAdapter(resolvedProvider);
 
     if (requestWithPrompt.stream) {
       const stream = await adapter.stream(requestWithPrompt, creds.apiKey);
-      logUsage(keyData, detectedProvider, requestWithPrompt.model, 200, Date.now() - startTime);
+      logUsage(keyData, resolvedProvider, requestWithPrompt.model, 200, Date.now() - startTime);
       return {
         type: "stream",
         stream,
-        providerType: detectedProvider,
+        providerType: resolvedProvider,
         model: requestWithPrompt.model,
       };
     } else {
       const data = await adapter.complete(requestWithPrompt, creds.apiKey);
       logUsage(
         keyData,
-        detectedProvider,
+        resolvedProvider,
         requestWithPrompt.model,
         200,
         Date.now() - startTime,
@@ -180,13 +191,13 @@ export async function executeProxyRequest(
       return {
         type: "json",
         data,
-        providerType: detectedProvider,
+        providerType: resolvedProvider,
         model: requestWithPrompt.model,
       };
     }
   } catch (err) {
     const safeError = sanitizeError(err);
-    logUsage(keyData, detectedProvider, request.model, 502, Date.now() - startTime, undefined, safeError);
-    throw new Error(`Provider ${detectedProvider} failed: ${safeError}`);
+    logUsage(keyData, resolvedProvider, request.model, 502, Date.now() - startTime, undefined, safeError);
+    throw new Error(`Provider ${resolvedProvider} failed: ${safeError}`);
   }
 }

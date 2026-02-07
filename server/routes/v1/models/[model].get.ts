@@ -1,6 +1,6 @@
 import { getConvexClient } from "~~/server/utils/convex";
 import { decrypt } from "~~/server/utils/crypto";
-import { getAdapter, detectProviderFromModel } from "~~/server/utils/adapters";
+import { getAdapter, detectProvidersFromModel } from "~~/server/utils/adapters";
 import { api } from "~~/convex/_generated/api";
 
 export default defineEventHandler(async (event) => {
@@ -28,15 +28,16 @@ export default defineEventHandler(async (event) => {
     };
   }
 
-  // Try to find the model in user's providers
-  const providerType = detectProviderFromModel(modelId);
-  if (providerType) {
-    const convex = getConvexClient();
+  // Try candidate providers for the model
+  const candidates = detectProvidersFromModel(modelId);
+  const convex = getConvexClient();
+
+  for (const providerType of candidates) {
     const provider = await convex.query(
       api.providers.queries.getByUserAndType,
       {
         userId: keyData.userId,
-        type: providerType as "claude-code" | "gemini" | "openrouter",
+        type: providerType as "claude-code" | "gemini" | "vertex-ai" | "openrouter",
       },
     );
 
@@ -48,7 +49,7 @@ export default defineEventHandler(async (event) => {
         const found = models.find((m) => m.id === modelId);
         if (found) return found;
       } catch {
-        // Fall through
+        // Try next candidate
       }
     }
   }

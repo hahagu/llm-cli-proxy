@@ -2,10 +2,12 @@ import type { ProviderAdapter } from "./types";
 import { ClaudeCodeAdapter } from "./claude-code";
 import { GeminiAdapter } from "./gemini";
 import { OpenRouterAdapter } from "./openrouter";
+import { VertexAiAdapter } from "./vertex-ai";
 
 const adapters: Record<string, ProviderAdapter> = {
   "claude-code": new ClaudeCodeAdapter(),
   gemini: new GeminiAdapter(),
+  "vertex-ai": new VertexAiAdapter(),
   openrouter: new OpenRouterAdapter(),
 };
 
@@ -15,18 +17,22 @@ export function getAdapter(providerType: string): ProviderAdapter {
   return adapter;
 }
 
-// Model prefix → provider type mapping for auto-routing
-const MODEL_PREFIXES: Array<[string, string]> = [
-  ["claude-", "claude-code"],
-  ["gemini-", "gemini"],
+// Model prefix → candidate provider types (ordered by preference)
+const MODEL_PROVIDERS: Array<[string, string[]]> = [
+  ["claude-", ["claude-code"]],
+  ["gemini-", ["vertex-ai", "gemini"]],
   // OpenRouter models use org/model format
 ];
 
-export function detectProviderFromModel(model: string): string | null {
-  for (const [prefix, provider] of MODEL_PREFIXES) {
-    if (model.startsWith(prefix)) return provider;
+/**
+ * Returns an ordered list of candidate provider types for a given model.
+ * The caller should try each until it finds one with configured credentials.
+ */
+export function detectProvidersFromModel(model: string): string[] {
+  for (const [prefix, providers] of MODEL_PROVIDERS) {
+    if (model.startsWith(prefix)) return providers;
   }
   // Models with "/" are likely OpenRouter format (e.g., "anthropic/claude-3")
-  if (model.includes("/")) return "openrouter";
-  return null;
+  if (model.includes("/")) return ["openrouter"];
+  return [];
 }

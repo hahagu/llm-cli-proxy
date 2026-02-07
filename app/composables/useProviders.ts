@@ -20,7 +20,7 @@ export function useProviders() {
   }
 
   async function createProvider(
-    type: "claude-code" | "gemini" | "openrouter",
+    type: "claude-code" | "gemini" | "vertex-ai" | "openrouter",
     apiKey: string,
   ) {
     // Encrypt the API key server-side

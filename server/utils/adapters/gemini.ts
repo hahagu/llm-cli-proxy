@@ -10,9 +10,9 @@ import type {
 } from "./types";
 import { generateId, nowUnix } from "./types";
 
-const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
+export const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
-// --- Request Translation ---
+// --- Request Translation (shared with Vertex AI adapter) ---
 
 interface GeminiPart {
   text?: string;
@@ -33,7 +33,7 @@ interface GeminiFunctionDeclaration {
   parameters?: Record<string, unknown>;
 }
 
-interface GeminiRequest {
+export interface GeminiRequest {
   contents: GeminiContent[];
   systemInstruction?: { parts: Array<{ text: string }> };
   generationConfig?: {
@@ -142,7 +142,7 @@ function translateMessages(messages: OpenAIMessage[]): {
   return { systemInstruction, contents };
 }
 
-function buildGeminiRequest(req: OpenAIChatRequest): GeminiRequest {
+export function buildGeminiRequest(req: OpenAIChatRequest): GeminiRequest {
   const { systemInstruction, contents } = translateMessages(req.messages);
   const geminiReq: GeminiRequest = { contents };
 
@@ -177,15 +177,13 @@ function buildGeminiRequest(req: OpenAIChatRequest): GeminiRequest {
   return geminiReq;
 }
 
-// --- Response Translation ---
+// --- Response Translation (shared with Vertex AI adapter) ---
 
-interface GeminiCandidate {
-  content: { role: string; parts: GeminiPart[] };
-  finishReason?: string;
-}
-
-interface GeminiResponse {
-  candidates: GeminiCandidate[];
+export interface GeminiResponse {
+  candidates: Array<{
+    content: { role: string; parts: GeminiPart[] };
+    finishReason?: string;
+  }>;
   usageMetadata?: {
     promptTokenCount: number;
     candidatesTokenCount: number;
@@ -209,7 +207,7 @@ function translateFinishReason(
   }
 }
 
-function translateGeminiResponse(
+export function translateGeminiResponse(
   resp: GeminiResponse,
   model: string,
 ): OpenAIChatResponse {
@@ -264,9 +262,9 @@ function translateGeminiResponse(
   };
 }
 
-// --- Streaming ---
+// --- Streaming (shared with Vertex AI adapter) ---
 
-function createStreamTransformer(
+export function createStreamTransformer(
   requestId: string,
   model: string,
 ): TransformStream<string, string> {
@@ -361,6 +359,32 @@ function createStreamTransformer(
   });
 }
 
+export function createLineDecoder(): TransformStream<Uint8Array, string> {
+  return new TransformStream<Uint8Array, string>({
+    start() {
+      // @ts-expect-error adding buffer property
+      this.buffer = "";
+    },
+    transform(chunk, controller) {
+      // @ts-expect-error accessing buffer property
+      this.buffer += new TextDecoder().decode(chunk);
+      // @ts-expect-error accessing buffer property
+      const lines = this.buffer.split("\n");
+      // @ts-expect-error accessing buffer property
+      this.buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed) controller.enqueue(trimmed);
+      }
+    },
+    flush(controller) {
+      // @ts-expect-error accessing buffer property
+      const remaining = this.buffer.trim();
+      if (remaining) controller.enqueue(remaining);
+    },
+  });
+}
+
 // --- Adapter ---
 
 export class GeminiAdapter implements ProviderAdapter {
@@ -411,35 +435,9 @@ export class GeminiAdapter implements ProviderAdapter {
       throw new Error("No response body from Gemini API");
     }
 
-    const transformer = createStreamTransformer(requestId, request.model);
-
-    const lineDecoder = new TransformStream<Uint8Array, string>({
-      start() {
-        // @ts-expect-error adding buffer property
-        this.buffer = "";
-      },
-      transform(chunk, controller) {
-        // @ts-expect-error accessing buffer property
-        this.buffer += new TextDecoder().decode(chunk);
-        // @ts-expect-error accessing buffer property
-        const lines = this.buffer.split("\n");
-        // @ts-expect-error accessing buffer property
-        this.buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (trimmed) controller.enqueue(trimmed);
-        }
-      },
-      flush(controller) {
-        // @ts-expect-error accessing buffer property
-        const remaining = this.buffer.trim();
-        if (remaining) controller.enqueue(remaining);
-      },
-    });
-
     return resp.body
-      .pipeThrough(lineDecoder)
-      .pipeThrough(transformer);
+      .pipeThrough(createLineDecoder())
+      .pipeThrough(createStreamTransformer(requestId, request.model));
   }
 
   async listModels(providerApiKey: string): Promise<OpenAIModelEntry[]> {
