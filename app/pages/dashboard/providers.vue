@@ -134,22 +134,6 @@
               "
             />
           </div>
-          <template v-if="provider.type === 'vertex-ai'">
-            <div class="mt-2 space-y-2">
-              <Label>Project ID</Label>
-              <Input
-                v-model="vertexProjectId"
-                placeholder="my-gcp-project"
-              />
-            </div>
-            <div class="mt-2 space-y-2">
-              <Label>Region</Label>
-              <Input
-                v-model="vertexRegion"
-                placeholder="asia-northeast1"
-              />
-            </div>
-          </template>
           <div v-if="testResults[provider.type]" class="mt-2 text-xs" :class="testResults[provider.type].success ? 'text-green-600' : 'text-destructive'">
             {{ testResults[provider.type].message }}
           </div>
@@ -164,7 +148,7 @@
               {{ testing[provider.type] ? "Testing..." : "Test Connection" }}
             </Button>
             <Button
-              :disabled="!provider.keyInput || (provider.type === 'vertex-ai' && !vertexProjectId) || saving[provider.type]"
+              :disabled="!provider.keyInput || saving[provider.type]"
               class="flex-1"
               @click="handleSave(provider.type)"
             >
@@ -267,19 +251,14 @@ function handleOAuthResult() {
 
 const saving = reactive<Record<string, boolean>>({
   gemini: false,
-  "vertex-ai": false,
   openrouter: false,
 });
 
 const testing = reactive<Record<string, boolean>>({
   "claude-code": false,
   gemini: false,
-  "vertex-ai": false,
   openrouter: false,
 });
-
-const vertexProjectId = ref("");
-const vertexRegion = ref("");
 
 const testResults = reactive<Record<string, { success: boolean; message: string }>>({});
 
@@ -318,16 +297,6 @@ const providerConfigs = reactive([
     iconColor: "text-blue-600 dark:text-blue-400",
   },
   {
-    type: "vertex-ai" as const,
-    label: "Vertex AI",
-    description: "Gemini models via Google Cloud Vertex AI. Works in all regions.",
-    keyInput: "",
-    keyUrl: "https://console.cloud.google.com/apis/credentials",
-    icon: "lucide:cloud",
-    iconBg: "bg-orange-100 dark:bg-orange-900/30",
-    iconColor: "text-orange-600 dark:text-orange-400",
-  },
-  {
     type: "openrouter" as const,
     label: "OpenRouter",
     description: "Access hundreds of models through OpenRouter's unified API.",
@@ -342,13 +311,9 @@ const providerConfigs = reactive([
 const getExisting = (type: string) =>
   providers.value.find((p) => p.type === type);
 
-const handleSave = async (type: "gemini" | "vertex-ai" | "openrouter") => {
+const handleSave = async (type: "gemini" | "openrouter") => {
   const config = providerConfigs.find((p) => p.type === type);
   if (!config?.keyInput) return;
-
-  const extra = type === "vertex-ai"
-    ? { projectId: vertexProjectId.value || undefined, region: vertexRegion.value || undefined }
-    : undefined;
 
   saving[type] = true;
   try {
@@ -356,16 +321,11 @@ const handleSave = async (type: "gemini" | "vertex-ai" | "openrouter") => {
     if (existing) {
       await updateProvider(String(existing._id), {
         apiKey: config.keyInput,
-        ...extra,
       });
     } else {
-      await createProvider(type, config.keyInput, extra);
+      await createProvider(type, config.keyInput);
     }
     config.keyInput = "";
-    if (type === "vertex-ai") {
-      vertexProjectId.value = "";
-      vertexRegion.value = "";
-    }
     toast.success(existing ? "Provider updated" : "Provider added");
   } catch (err) {
     console.error(`Failed to save ${type} provider:`, err);

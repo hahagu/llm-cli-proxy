@@ -50,11 +50,10 @@
 
         <Button
           variant="outline"
-          size="sm"
           :disabled="chat.messages.value.length === 0"
           @click="chat.clearMessages()"
         >
-          <Trash2 class="mr-1.5 h-3.5 w-3.5" />
+          <Trash2 />
           Clear
         </Button>
       </div>
@@ -131,7 +130,7 @@
         v-if="chat.loading.value"
         variant="destructive"
         size="icon"
-        class="shrink-0 self-end"
+        class="shrink-0 self-end size-11"
         @click="chat.stopGeneration()"
       >
         <Square class="h-4 w-4" />
@@ -139,7 +138,7 @@
       <Button
         v-else
         size="icon"
-        class="shrink-0 self-end"
+        class="shrink-0 self-end size-11"
         :disabled="!inputMessage.trim() || !selectedApiKeyId || !selectedModel"
         @click="handleSend"
       >

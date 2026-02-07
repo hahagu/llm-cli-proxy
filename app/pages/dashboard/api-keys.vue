@@ -10,7 +10,7 @@
       <Dialog v-model:open="showCreateDialog">
         <DialogTrigger as-child>
           <Button>
-            <Plus class="mr-2 h-4 w-4" />
+            <Plus />
             Generate Key
           </Button>
         </DialogTrigger>
@@ -74,7 +74,7 @@
     </Card>
 
     <!-- API Keys Table -->
-    <Card>
+    <Card class="py-0">
       <CardContent class="p-0">
         <Table>
           <TableHeader>

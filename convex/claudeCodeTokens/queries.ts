@@ -1,4 +1,4 @@
-import { query } from "../_generated/server";
+import { query, internalQuery } from "../_generated/server";
 import { v } from "convex/values";
 
 export const getByUserId = query({
@@ -8,5 +8,12 @@ export const getByUserId = query({
       .query("claudeCodeTokens")
       .withIndex("by_userId", (q) => q.eq("userId", args.userId))
       .first();
+  },
+});
+
+export const listAll = internalQuery({
+  args: {},
+  async handler(ctx) {
+    return ctx.db.query("claudeCodeTokens").collect();
   },
 });

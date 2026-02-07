@@ -14,7 +14,7 @@
           <Settings class="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div class="text-2xl font-bold">{{ providers.length }}</div>
+          <div class="text-2xl font-bold">{{ providerCount }}</div>
           <p class="text-xs text-muted-foreground">configured</p>
         </CardContent>
       </Card>
@@ -59,7 +59,7 @@
           <div
             class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold"
             :class="
-              providers.length > 0
+              providerCount > 0
                 ? 'bg-primary text-primary-foreground'
                 : 'bg-muted text-muted-foreground'
             "
@@ -125,12 +125,19 @@ import { KeyRound, Settings, MessageSquare } from "lucide-vue-next";
 import { useApiKeys } from "~/composables/useApiKeys";
 import { useProviders } from "~/composables/useProviders";
 import { useSystemPrompts } from "~/composables/useSystemPrompts";
+import { dashboardFetch } from "~/utils/dashboard-fetch";
 
 definePageMeta({ layout: "dashboard" });
 
 const { keys, fetchKeys } = useApiKeys();
 const { providers, fetchProviders } = useProviders();
 const { prompts, fetchPrompts } = useSystemPrompts();
+
+const claudeCodeAvailable = ref(false);
+
+const providerCount = computed(
+  () => providers.value.length + (claudeCodeAvailable.value ? 1 : 0),
+);
 
 const activeKeyCount = computed(
   () => keys.value.filter((k) => k.isActive).length,
@@ -140,5 +147,8 @@ onMounted(() => {
   fetchKeys();
   fetchProviders();
   fetchPrompts();
+  dashboardFetch<{ configured: boolean }>("/api/dashboard/claude-code-status")
+    .then((data) => { claudeCodeAvailable.value = data.configured; })
+    .catch(() => { /* ignore */ });
 });
 </script>

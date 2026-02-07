@@ -196,6 +196,37 @@ export async function getAccessTokenForUser(userId: string): Promise<string> {
 }
 
 /**
+ * Refresh tokens for all users that are approaching expiry.
+ * Used by the periodic background refresh plugin.
+ */
+export async function refreshAllTokens(): Promise<void> {
+  const convex = getConvexClient();
+  const allTokens = await convex.query(
+    internal.claudeCodeTokens.queries.listAll as any,
+    {},
+  );
+
+  if (!allTokens || allTokens.length === 0) return;
+
+  for (const token of allTokens) {
+    const expiresAt: number | null = token.expiresAt ?? null;
+    if (!isTokenExpired(expiresAt)) continue;
+
+    try {
+      await doRefresh(token.userId);
+      console.log(
+        `[token-refresh] Refreshed token for user ${token.userId}`,
+      );
+    } catch (err) {
+      console.error(
+        `[token-refresh] Failed to refresh token for user ${token.userId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+}
+
+/**
  * Get the Claude OAuth client ID (used by the auth start endpoint).
  */
 export function getClientId(): string {

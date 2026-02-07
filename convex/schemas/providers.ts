@@ -6,7 +6,6 @@ export const providers = defineTable({
   type: v.union(
     v.literal("claude-code"),
     v.literal("gemini"),
-    v.literal("vertex-ai"),
     v.literal("openrouter"),
   ),
   encryptedApiKey: v.string(),

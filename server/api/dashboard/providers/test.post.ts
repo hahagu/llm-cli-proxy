@@ -5,7 +5,7 @@ import { getAdapter } from "~~/server/utils/adapters";
 import { getAccessTokenForUser, isConfiguredForUser } from "~~/server/utils/claude-code-oauth";
 import { api } from "~~/convex/_generated/api";
 
-const VALID_TYPES = ["claude-code", "gemini", "vertex-ai", "openrouter"] as const;
+const VALID_TYPES = ["claude-code", "gemini", "openrouter"] as const;
 
 export default defineEventHandler(async (event) => {
   const session = await validateDashboardSession(event);
@@ -38,7 +38,7 @@ export default defineEventHandler(async (event) => {
         api.providers.queries.getByUserAndType,
         {
           userId: session.userId,
-          type: type as "gemini" | "vertex-ai" | "openrouter",
+          type: type as "gemini" | "openrouter",
         },
       );
 

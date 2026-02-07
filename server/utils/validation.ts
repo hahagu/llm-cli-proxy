@@ -128,14 +128,10 @@ export const generateKeySchema = z.object({
 });
 
 export const createProviderSchema = z.object({
-  type: z.enum(["claude-code", "gemini", "vertex-ai", "openrouter"]),
+  type: z.enum(["claude-code", "gemini", "openrouter"]),
   apiKey: z.string().min(1),
-  projectId: z.string().min(1).optional(),
-  region: z.string().min(1).optional(),
 });
 
 export const updateProviderSchema = z.object({
   apiKey: z.string().min(1).optional(),
-  projectId: z.string().min(1).optional(),
-  region: z.string().min(1).optional(),
 });

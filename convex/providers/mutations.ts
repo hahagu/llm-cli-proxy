@@ -7,7 +7,6 @@ export const create = mutation({
     type: v.union(
       v.literal("claude-code"),
       v.literal("gemini"),
-      v.literal("vertex-ai"),
       v.literal("openrouter"),
     ),
     encryptedApiKey: v.string(),

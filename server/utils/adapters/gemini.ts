@@ -12,7 +12,7 @@ import { generateId, nowUnix } from "./types";
 
 export const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
-// --- Request Translation (shared with Vertex AI adapter) ---
+// --- Request Translation ---
 
 interface GeminiPart {
   text?: string;
@@ -177,7 +177,7 @@ export function buildGeminiRequest(req: OpenAIChatRequest): GeminiRequest {
   return geminiReq;
 }
 
-// --- Response Translation (shared with Vertex AI adapter) ---
+// --- Response Translation ---
 
 export interface GeminiResponse {
   candidates: Array<{
@@ -262,7 +262,7 @@ export function translateGeminiResponse(
   };
 }
 
-// --- Streaming (shared with Vertex AI adapter) ---
+// --- Streaming ---
 
 export function createStreamTransformer(
   requestId: string,

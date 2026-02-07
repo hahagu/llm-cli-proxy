@@ -1,6 +1,6 @@
 import { getConvexClient } from "~~/server/utils/convex";
 import { decrypt } from "~~/server/utils/crypto";
-import { getAdapter, detectProvidersFromModel } from "~~/server/utils/adapters";
+import { getAdapter, detectProviderFromModel } from "~~/server/utils/adapters";
 import { api } from "~~/convex/_generated/api";
 
 export default defineEventHandler(async (event) => {
@@ -28,29 +28,36 @@ export default defineEventHandler(async (event) => {
     };
   }
 
-  // Try candidate providers for the model
-  const candidates = detectProvidersFromModel(modelId);
-  const convex = getConvexClient();
-
-  for (const providerType of candidates) {
-    const provider = await convex.query(
-      api.providers.queries.getByUserAndType,
-      {
-        userId: keyData.userId,
-        type: providerType as "claude-code" | "gemini" | "vertex-ai" | "openrouter",
+  const providerType = detectProviderFromModel(modelId);
+  if (!providerType) {
+    setResponseStatus(event, 404);
+    return {
+      error: {
+        message: `Model '${modelId}' not found`,
+        type: "invalid_request_error",
+        code: "model_not_found",
       },
-    );
+    };
+  }
 
-    if (provider) {
-      try {
-        const apiKey = decrypt(provider.encryptedApiKey, provider.keyIv);
-        const adapter = getAdapter(providerType);
-        const models = await adapter.listModels(apiKey);
-        const found = models.find((m) => m.id === modelId);
-        if (found) return found;
-      } catch {
-        // Try next candidate
-      }
+  const convex = getConvexClient();
+  const provider = await convex.query(
+    api.providers.queries.getByUserAndType,
+    {
+      userId: keyData.userId,
+      type: providerType as "claude-code" | "gemini" | "openrouter",
+    },
+  );
+
+  if (provider) {
+    try {
+      const apiKey = decrypt(provider.encryptedApiKey, provider.keyIv);
+      const adapter = getAdapter(providerType);
+      const models = await adapter.listModels(apiKey);
+      const found = models.find((m) => m.id === modelId);
+      if (found) return found;
+    } catch {
+      // Fall through to 404
     }
   }
 

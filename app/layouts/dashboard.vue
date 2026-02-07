@@ -40,19 +40,22 @@
             </div>
           </div>
           <div class="mt-3 flex gap-2">
-            <button
-              class="flex-1 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition hover:bg-muted hover:text-foreground"
+            <Button
+              variant="outline"
+              size="sm"
+              class="flex-1"
               @click="handleSignOut"
             >
               Sign out
-            </button>
-            <button
-              class="rounded-lg border border-border px-2.5 py-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+            </Button>
+            <Button
+              variant="outline"
+              size="icon-sm"
               @click="colorMode.toggle()"
             >
-              <Sun v-if="colorMode.mode.value === 'dark'" class="h-3.5 w-3.5" />
-              <Moon v-else class="h-3.5 w-3.5" />
-            </button>
+              <Sun v-if="colorMode.mode.value === 'dark'" />
+              <Moon v-else />
+            </Button>
           </div>
         </div>
       </div>
@@ -92,13 +95,14 @@
           </SheetContent>
         </Sheet>
         <h1 class="flex-1 text-lg font-semibold">LLM Proxy</h1>
-        <button
-          class="rounded-lg border border-border p-2 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+        <Button
+          variant="outline"
+          size="icon"
           @click="colorMode.toggle()"
         >
-          <Sun v-if="colorMode.mode.value === 'dark'" class="h-4 w-4" />
-          <Moon v-else class="h-4 w-4" />
-        </button>
+          <Sun v-if="colorMode.mode.value === 'dark'" />
+          <Moon v-else />
+        </Button>
       </header>
 
       <!-- Main content -->

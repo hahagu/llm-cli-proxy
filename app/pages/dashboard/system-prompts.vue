@@ -11,7 +11,7 @@
       <Dialog v-model:open="showDialog">
         <DialogTrigger as-child>
           <Button @click="resetForm">
-            <Plus class="mr-2 h-4 w-4" />
+            <Plus />
             New Prompt
           </Button>
         </DialogTrigger>
@@ -73,7 +73,7 @@
         Create a global default prompt to customize LLM behavior across all chains.
       </p>
       <Button class="mt-4" @click="showDialog = true; resetForm()">
-        <Plus class="mr-2 h-4 w-4" />
+        <Plus />
         Create Your First Prompt
       </Button>
     </div>

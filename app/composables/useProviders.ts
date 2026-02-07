@@ -20,14 +20,13 @@ export function useProviders() {
   }
 
   async function createProvider(
-    type: "claude-code" | "gemini" | "vertex-ai" | "openrouter",
+    type: "claude-code" | "gemini" | "openrouter",
     apiKey: string,
-    extra?: { projectId?: string; region?: string },
   ) {
     // Encrypt the API key server-side
     const encrypted = await dashboardFetch("/api/dashboard/providers", {
       method: "POST",
-      body: { type, apiKey, ...extra },
+      body: { type, apiKey },
     }) as { encryptedApiKey: string; keyIv: string };
 
     // Store in Convex
@@ -42,14 +41,14 @@ export function useProviders() {
 
   async function updateProvider(
     id: string,
-    updates: { apiKey?: string; projectId?: string; region?: string },
+    updates: { apiKey?: string },
   ) {
     const mutation: Record<string, unknown> = { id: id as never };
 
     if (updates.apiKey) {
       const encrypted = await dashboardFetch(`/api/dashboard/providers/${id}`, {
         method: "PUT",
-        body: { apiKey: updates.apiKey, projectId: updates.projectId, region: updates.region },
+        body: { apiKey: updates.apiKey },
       }) as { encryptedApiKey: string; keyIv: string };
       mutation.encryptedApiKey = encrypted.encryptedApiKey;
       mutation.keyIv = encrypted.keyIv;
