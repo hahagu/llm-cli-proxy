@@ -26,11 +26,10 @@ export function encrypt(plaintext: string): { encrypted: string; iv: string } {
 export function decrypt(encrypted: string, iv: string): string {
   const key = getEncryptionKey();
   const [encData, authTagB64] = encrypted.split(".");
-  const decipher = createDecipheriv(
-    ALGORITHM,
-    key,
-    Buffer.from(iv, "base64"),
-  );
+  if (!authTagB64 || !encData) {
+    throw new Error("Invalid encrypted data format");
+  }
+  const decipher = createDecipheriv(ALGORITHM, key, Buffer.from(iv, "base64"));
   decipher.setAuthTag(Buffer.from(authTagB64, "base64"));
   let dec = decipher.update(encData, "base64", "utf8");
   dec += decipher.final("utf8");
