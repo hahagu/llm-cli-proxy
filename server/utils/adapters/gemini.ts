@@ -457,6 +457,7 @@ export class GeminiAdapter implements ProviderAdapter {
         object: "model" as const,
         created: nowUnix(),
         owned_by: "google",
+        ...(m.displayName ? { name: m.displayName } : {}),
       }));
   }
 }

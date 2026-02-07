@@ -1,6 +1,6 @@
 import { getConvexClient } from "./convex";
 import { decrypt } from "./crypto";
-import { getAdapter, detectProviderFromModel } from "./adapters";
+import { getAdapter, parseModelWithProvider } from "./adapters";
 import { getAccessTokenForUser, isConfiguredForUser } from "./claude-code-oauth";
 import { api, internal } from "~~/convex/_generated/api";
 import type { OpenAIChatRequest, OpenAIChatResponse } from "./adapters/types";
@@ -137,37 +137,41 @@ export async function executeProxyRequest(
   // Apply system prompt hierarchy for the requested model
   const requestWithPrompt = await applySystemPromptHierarchy(request, keyData.userId);
 
-  // Detect provider from the model name
-  const providerType = detectProviderFromModel(requestWithPrompt.model);
-  if (!providerType) {
+  // Detect provider from the model name (supports "provider:model" prefix format)
+  const parsed = parseModelWithProvider(requestWithPrompt.model);
+  if (!parsed) {
     logUsage(keyData, "none", request.model, 400, Date.now() - startTime, undefined, "Unknown model provider");
     throw new Error(`Cannot determine provider for model: ${request.model}`);
   }
+  const { provider: providerType, model: rawModel } = parsed;
+
+  // Replace the prefixed model with the raw model ID for the upstream API
+  const upstreamRequest = { ...requestWithPrompt, model: rawModel };
 
   const creds = await getProviderCredentials(keyData.userId, providerType);
   if (!creds) {
-    logUsage(keyData, providerType, request.model, 502, Date.now() - startTime, undefined, "No credentials configured");
+    logUsage(keyData, providerType, rawModel, 502, Date.now() - startTime, undefined, "No credentials configured");
     throw new Error(`No credentials configured for provider ${providerType}`);
   }
 
   try {
     const adapter = getAdapter(providerType);
 
-    if (requestWithPrompt.stream) {
-      const stream = await adapter.stream(requestWithPrompt, creds.apiKey);
-      logUsage(keyData, providerType, requestWithPrompt.model, 200, Date.now() - startTime);
+    if (upstreamRequest.stream) {
+      const stream = await adapter.stream(upstreamRequest, creds.apiKey);
+      logUsage(keyData, providerType, rawModel, 200, Date.now() - startTime);
       return {
         type: "stream",
         stream,
         providerType: providerType,
-        model: requestWithPrompt.model,
+        model: rawModel,
       };
     } else {
-      const data = await adapter.complete(requestWithPrompt, creds.apiKey);
+      const data = await adapter.complete(upstreamRequest, creds.apiKey);
       logUsage(
         keyData,
         providerType,
-        requestWithPrompt.model,
+        rawModel,
         200,
         Date.now() - startTime,
         data.usage
@@ -181,12 +185,12 @@ export async function executeProxyRequest(
         type: "json",
         data,
         providerType: providerType,
-        model: requestWithPrompt.model,
+        model: rawModel,
       };
     }
   } catch (err) {
     const safeError = sanitizeError(err);
-    logUsage(keyData, providerType, request.model, 502, Date.now() - startTime, undefined, safeError);
+    logUsage(keyData, providerType, rawModel, 502, Date.now() - startTime, undefined, safeError);
     throw new Error(`Provider ${providerType} failed: ${safeError}`);
   }
 }

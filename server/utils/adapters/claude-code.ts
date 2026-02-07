@@ -354,7 +354,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     }
 
     const data = (await resp.json()) as {
-      data?: Array<{ id: string; created_at?: string }>;
+      data?: Array<{ id: string; display_name?: string; created_at?: string }>;
     };
 
     if (!data.data || data.data.length === 0) {
@@ -370,6 +370,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
         ? Math.floor(new Date(m.created_at).getTime() / 1000)
         : nowUnix(),
       owned_by: "anthropic-claude-code",
+      ...(m.display_name ? { name: m.display_name } : {}),
     }));
   }
 }

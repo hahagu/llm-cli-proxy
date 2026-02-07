@@ -111,6 +111,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       object: "model" as const,
       created: m.created ?? nowUnix(),
       owned_by: "openrouter",
+      ...(m.name ? { name: m.name } : {}),
     }));
   }
 }

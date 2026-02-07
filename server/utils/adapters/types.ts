@@ -114,6 +114,7 @@ export interface OpenAIModelEntry {
   object: "model";
   created: number;
   owned_by: string;
+  name?: string;
 }
 
 // --- Adapter Interface ---

@@ -1,6 +1,6 @@
 import { getConvexClient } from "~~/server/utils/convex";
 import { decrypt } from "~~/server/utils/crypto";
-import { getAdapter } from "~~/server/utils/adapters";
+import { getAdapter, getProviderDisplayPrefix } from "~~/server/utils/adapters";
 import { isConfiguredForUser, getAccessTokenForUser } from "~~/server/utils/claude-code-oauth";
 import { api } from "~~/convex/_generated/api";
 import type { OpenAIModelEntry } from "~~/server/utils/adapters/types";
@@ -65,7 +65,14 @@ export default defineEventHandler(async (event) => {
       ? (i === 0 ? "claude-code" : providers[i - 1]!.type)
       : providers[i]!.type;
     if (result.status === "fulfilled") {
-      allModels.push(...result.value.models);
+      // Prefix model IDs and display names with provider type for disambiguation
+      const displayPrefix = getProviderDisplayPrefix(type);
+      const prefixed = result.value.models.map((m) => ({
+        ...m,
+        id: `${type}:${m.id}`,
+        name: m.name ? `${displayPrefix} - ${m.name}` : `${displayPrefix} - ${m.id}`,
+      }));
+      allModels.push(...prefixed);
     } else {
       const msg = result.reason instanceof Error
         ? result.reason.message
