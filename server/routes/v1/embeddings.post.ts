@@ -3,7 +3,7 @@ import { decrypt } from "~~/server/utils/crypto";
 import { parseModelWithProvider } from "~~/server/utils/adapters";
 import { embeddingRequestSchema } from "~~/server/utils/validation";
 import { OpenAIError, invalidRequest, providerError } from "~~/server/utils/errors";
-import { GEMINI_API_BASE } from "~~/server/utils/adapters/gemini";
+import { GEMINI_API_BASE, geminiFetch } from "~~/server/utils/adapters/gemini";
 import { api } from "~~/convex/_generated/api";
 
 const OPENROUTER_API_URL = "https://openrouter.ai/api/v1";
@@ -112,7 +112,7 @@ async function handleGeminiEmbedding(
 
   for (let i = 0; i < inputs.length; i++) {
     const url = `${GEMINI_API_BASE}/models/${model}:embedContent?key=${apiKey}`;
-    const resp = await fetch(url, {
+    const resp = await geminiFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

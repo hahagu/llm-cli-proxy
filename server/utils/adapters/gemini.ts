@@ -10,9 +10,42 @@ import type {
 } from "./types";
 import { mapProviderHttpError, providerError } from "../errors";
 import { generateId, nowUnix } from "./types";
+import { promises as dns } from "node:dns";
 
 export const GEMINI_API_BASE =
   "https://generativelanguage.googleapis.com/v1beta";
+
+/**
+ * IPv6-aware fetch for Gemini API.
+ * Bun's Happy Eyeballs algorithm may race IPv4/IPv6 and pick IPv4.
+ * When PREFER_IPV6 is enabled, resolve the hostname to IPv6 ourselves
+ * and connect directly to the IPv6 address with a Host header.
+ */
+export async function geminiFetch(
+  url: string,
+  init?: RequestInit,
+): Promise<Response> {
+  if (process.env.PREFER_IPV6 !== "true") {
+    return fetch(url, init);
+  }
+
+  const parsed = new URL(url);
+  const hostname = parsed.hostname;
+
+  try {
+    const ipv6Addresses = await dns.resolve6(hostname);
+    if (ipv6Addresses.length > 0) {
+      parsed.hostname = `[${ipv6Addresses[0]}]`;
+      const headers = new Headers(init?.headers);
+      headers.set("Host", hostname);
+      return fetch(parsed.toString(), { ...init, headers });
+    }
+  } catch {
+    // No AAAA records, fall through to normal fetch
+  }
+
+  return fetch(url, init);
+}
 
 // --- Request Translation ---
 
@@ -471,16 +504,7 @@ export class GeminiAdapter implements ProviderAdapter {
     const geminiReq = buildGeminiRequest(request);
     const url = `${GEMINI_API_BASE}/models/${request.model}:generateContent?key=${providerApiKey}`;
 
-    // Diagnostic: check what IP we're connecting from
-    try {
-      const ipResp = await fetch("https://api64.ipify.org");
-      const ip = await ipResp.text();
-      console.log(`[gemini] Outgoing IP from Nitro fetch: ${ip}`);
-    } catch (e) {
-      console.error("[gemini] IP check failed:", e);
-    }
-
-    const resp = await fetch(url, {
+    const resp = await geminiFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(geminiReq),
@@ -503,7 +527,7 @@ export class GeminiAdapter implements ProviderAdapter {
     const url = `${GEMINI_API_BASE}/models/${request.model}:streamGenerateContent?alt=sse&key=${providerApiKey}`;
     const requestId = generateId();
 
-    const resp = await fetch(url, {
+    const resp = await geminiFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(geminiReq),
@@ -530,17 +554,8 @@ export class GeminiAdapter implements ProviderAdapter {
   }
 
   async listModels(providerApiKey: string): Promise<OpenAIModelEntry[]> {
-    // Diagnostic: check what IP we're connecting from
-    try {
-      const ipResp = await fetch("https://api64.ipify.org");
-      const ip = await ipResp.text();
-      console.log(`[gemini:listModels] Outgoing IP from Nitro fetch: ${ip}`);
-    } catch (e) {
-      console.error("[gemini:listModels] IP check failed:", e);
-    }
-
     const url = `${GEMINI_API_BASE}/models?key=${providerApiKey}`;
-    const resp = await fetch(url);
+    const resp = await geminiFetch(url);
     if (!resp.ok) {
       const body = await resp.text();
       throw mapProviderHttpError("Gemini", resp.status, body);
