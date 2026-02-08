@@ -471,6 +471,15 @@ export class GeminiAdapter implements ProviderAdapter {
     const geminiReq = buildGeminiRequest(request);
     const url = `${GEMINI_API_BASE}/models/${request.model}:generateContent?key=${providerApiKey}`;
 
+    // Diagnostic: check what IP we're connecting from
+    try {
+      const ipResp = await fetch("https://api64.ipify.org");
+      const ip = await ipResp.text();
+      console.log(`[gemini] Outgoing IP from Nitro fetch: ${ip}`);
+    } catch (e) {
+      console.error("[gemini] IP check failed:", e);
+    }
+
     const resp = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
