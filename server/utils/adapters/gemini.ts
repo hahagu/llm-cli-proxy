@@ -11,7 +11,8 @@ import type {
 import { mapProviderHttpError, providerError } from "../errors";
 import { generateId, nowUnix } from "./types";
 
-export const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
+export const GEMINI_API_BASE =
+  "https://generativelanguage.googleapis.com/v1beta";
 
 // --- Request Translation ---
 
@@ -78,12 +79,13 @@ function translateMessages(messages: OpenAIMessage[]): {
 
   for (const msg of messages) {
     if (msg.role === "system") {
-      const text = typeof msg.content === "string"
-        ? msg.content
-        : (msg.content ?? [])
-            .filter((p) => p.type === "text")
-            .map((p) => (p as { text: string }).text)
-            .join("\n");
+      const text =
+        typeof msg.content === "string"
+          ? msg.content
+          : (msg.content ?? [])
+              .filter((p) => p.type === "text")
+              .map((p) => (p as { text: string }).text)
+              .join("\n");
       systemInstruction = systemInstruction
         ? systemInstruction + "\n" + text
         : text;
@@ -94,20 +96,23 @@ function translateMessages(messages: OpenAIMessage[]): {
       // Tool results in Gemini are functionResponse parts
       let responseData: Record<string, unknown>;
       try {
-        responseData = typeof msg.content === "string"
-          ? JSON.parse(msg.content)
-          : { result: msg.content };
+        responseData =
+          typeof msg.content === "string"
+            ? JSON.parse(msg.content)
+            : { result: msg.content };
       } catch {
         responseData = { result: msg.content };
       }
       contents.push({
         role: "user",
-        parts: [{
-          functionResponse: {
-            name: msg.name ?? "unknown",
-            response: responseData,
+        parts: [
+          {
+            functionResponse: {
+              name: msg.name ?? "unknown",
+              response: responseData,
+            },
           },
-        }],
+        ],
       });
       continue;
     }
@@ -169,20 +174,24 @@ export function buildGeminiRequest(req: OpenAIChatRequest): GeminiRequest {
   if (req.response_format?.type === "json_object") {
     genConfig.responseMimeType = "application/json";
   }
-  if (req.frequency_penalty !== undefined) genConfig.frequencyPenalty = req.frequency_penalty;
-  if (req.presence_penalty !== undefined) genConfig.presencePenalty = req.presence_penalty;
+  if (req.frequency_penalty !== undefined)
+    genConfig.frequencyPenalty = req.frequency_penalty;
+  if (req.presence_penalty !== undefined)
+    genConfig.presencePenalty = req.presence_penalty;
   if (Object.keys(genConfig).length > 0) {
     geminiReq.generationConfig = genConfig;
   }
 
   if (req.tools && req.tools.length > 0) {
-    geminiReq.tools = [{
-      functionDeclarations: req.tools.map((t) => ({
-        name: t.function.name,
-        description: t.function.description,
-        parameters: t.function.parameters,
-      })),
-    }];
+    geminiReq.tools = [
+      {
+        functionDeclarations: req.tools.map((t) => ({
+          name: t.function.name,
+          description: t.function.description,
+          parameters: t.function.parameters,
+        })),
+      },
+    ];
   }
 
   // Map tool_choice to Gemini's toolConfig
@@ -193,7 +202,10 @@ export function buildGeminiRequest(req: OpenAIChatRequest): GeminiRequest {
       geminiReq.toolConfig = { functionCallingConfig: { mode: "AUTO" } };
     } else if (req.tool_choice === "required") {
       geminiReq.toolConfig = { functionCallingConfig: { mode: "ANY" } };
-    } else if (typeof req.tool_choice === "object" && req.tool_choice.function?.name) {
+    } else if (
+      typeof req.tool_choice === "object" &&
+      req.tool_choice.function?.name
+    ) {
       geminiReq.toolConfig = {
         functionCallingConfig: {
           mode: "ANY",
@@ -243,12 +255,13 @@ export function translateGeminiResponse(
   const candidate = resp.candidates?.[0];
   let textContent = "";
   const toolCalls: OpenAIToolCall[] = [];
-  let toolIndex = 0;
 
   if (candidate?.content?.parts) {
     for (const part of candidate.content.parts) {
       if (part.text) {
         textContent += part.text;
+      } else if (part.inlineData) {
+        textContent += `![image](data:${part.inlineData.mimeType};base64,${part.inlineData.data})`;
       } else if (part.functionCall) {
         toolCalls.push({
           id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
@@ -258,29 +271,31 @@ export function translateGeminiResponse(
             arguments: JSON.stringify(part.functionCall.args),
           },
         });
-        toolIndex++;
       }
     }
   }
 
-  const finishReason = toolCalls.length > 0
-    ? "tool_calls" as const
-    : translateFinishReason(candidate?.finishReason);
+  const finishReason =
+    toolCalls.length > 0
+      ? ("tool_calls" as const)
+      : translateFinishReason(candidate?.finishReason);
 
   return {
     id: generateId(),
     object: "chat.completion",
     created: nowUnix(),
     model,
-    choices: [{
-      index: 0,
-      message: {
-        role: "assistant",
-        content: textContent || null,
-        ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: textContent || null,
+          ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+        },
+        finish_reason: finishReason,
       },
-      finish_reason: finishReason,
-    }],
+    ],
     usage: resp.usageMetadata
       ? {
           prompt_tokens: resp.usageMetadata.promptTokenCount,
@@ -323,14 +338,36 @@ export function createStreamTransformer(
             object: "chat.completion.chunk",
             created: nowUnix(),
             model,
-            choices: [{
-              index: 0,
-              delta: {
-                ...(sentRole ? {} : { role: "assistant" }),
-                content: part.text,
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  ...(sentRole ? {} : { role: "assistant" }),
+                  content: part.text,
+                },
+                finish_reason: null,
               },
-              finish_reason: null,
-            }],
+            ],
+          };
+          sentRole = true;
+          controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
+        } else if (part.inlineData) {
+          const markdownImage = `![image](data:${part.inlineData.mimeType};base64,${part.inlineData.data})`;
+          const chunk: OpenAIStreamChunk = {
+            id: requestId,
+            object: "chat.completion.chunk",
+            created: nowUnix(),
+            model,
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  ...(sentRole ? {} : { role: "assistant" }),
+                  content: markdownImage,
+                },
+                finish_reason: null,
+              },
+            ],
           };
           sentRole = true;
           controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
@@ -340,22 +377,26 @@ export function createStreamTransformer(
             object: "chat.completion.chunk",
             created: nowUnix(),
             model,
-            choices: [{
-              index: 0,
-              delta: {
-                ...(sentRole ? {} : { role: "assistant" }),
-                tool_calls: [{
-                  index: 0,
-                  id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
-                  type: "function",
-                  function: {
-                    name: part.functionCall.name,
-                    arguments: JSON.stringify(part.functionCall.args),
-                  },
-                }],
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  ...(sentRole ? {} : { role: "assistant" }),
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+                      type: "function",
+                      function: {
+                        name: part.functionCall.name,
+                        arguments: JSON.stringify(part.functionCall.args),
+                      },
+                    },
+                  ],
+                },
+                finish_reason: null,
               },
-              finish_reason: null,
-            }],
+            ],
           };
           sentRole = true;
           controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
@@ -369,18 +410,21 @@ export function createStreamTransformer(
           object: "chat.completion.chunk",
           created: nowUnix(),
           model,
-          choices: [{
-            index: 0,
-            delta: {},
-            finish_reason: finishReason,
-          }],
-          usage: includeUsage && event.usageMetadata
-            ? {
-                prompt_tokens: event.usageMetadata.promptTokenCount,
-                completion_tokens: event.usageMetadata.candidatesTokenCount,
-                total_tokens: event.usageMetadata.totalTokenCount,
-              }
-            : undefined,
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: finishReason,
+            },
+          ],
+          usage:
+            includeUsage && event.usageMetadata
+              ? {
+                  prompt_tokens: event.usageMetadata.promptTokenCount,
+                  completion_tokens: event.usageMetadata.candidatesTokenCount,
+                  total_tokens: event.usageMetadata.totalTokenCount,
+                }
+              : undefined,
         };
         controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
         controller.enqueue("data: [DONE]\n\n");
@@ -467,7 +511,13 @@ export class GeminiAdapter implements ProviderAdapter {
 
     return resp.body
       .pipeThrough(createLineDecoder())
-      .pipeThrough(createStreamTransformer(requestId, request.model, !!request.stream_options?.include_usage));
+      .pipeThrough(
+        createStreamTransformer(
+          requestId,
+          request.model,
+          !!request.stream_options?.include_usage,
+        ),
+      );
   }
 
   async listModels(providerApiKey: string): Promise<OpenAIModelEntry[]> {

@@ -232,6 +232,10 @@ export function openAIToAnthropic(
     }
   }
 
+  if (content.length === 0) {
+    content.push({ type: "text", text: "" });
+  }
+
   return {
     id: resp.id.startsWith("msg_") ? resp.id : `msg_${resp.id}`,
     type: "message",

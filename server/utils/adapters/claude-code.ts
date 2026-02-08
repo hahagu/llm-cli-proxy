@@ -451,6 +451,14 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
         for (const block of message.message.content) {
           if (block.type === "text") {
             resultText += block.text;
+          } else if (block.type === "image") {
+            const source = (block as Record<string, unknown>).source as
+              | { type: string; media_type?: string; data?: string }
+              | undefined;
+            if (source?.type === "base64" && source.data) {
+              const mimeType = source.media_type ?? "image/png";
+              resultText += `![image](data:${mimeType};base64,${source.data})`;
+            }
           }
         }
       }
@@ -673,6 +681,14 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               for (const block of msg.message?.content ?? []) {
                 if (block.type === "text" && block.text) {
                   resultText += block.text;
+                } else if (block.type === "image") {
+                  const source = (block as Record<string, unknown>).source as
+                    | { type: string; media_type?: string; data?: string }
+                    | undefined;
+                  if (source?.type === "base64" && source.data) {
+                    const mimeType = source.media_type ?? "image/png";
+                    resultText += `![image](data:${mimeType};base64,${source.data})`;
+                  }
                 }
               }
             }

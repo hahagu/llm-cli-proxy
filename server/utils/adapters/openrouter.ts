@@ -32,7 +32,13 @@ export class OpenRouterAdapter implements ProviderAdapter {
       throw mapProviderHttpError("OpenRouter", resp.status, errorBody);
     }
 
-    return (await resp.json()) as OpenAIChatResponse;
+    const data = await resp.json();
+    if (!data || typeof data !== "object" || !Array.isArray(data.choices)) {
+      throw providerError(
+        `OpenRouter returned malformed response: missing 'choices' array (keys: ${data ? Object.keys(data).join(", ") : "null"})`,
+      );
+    }
+    return data as OpenAIChatResponse;
   }
 
   async stream(
