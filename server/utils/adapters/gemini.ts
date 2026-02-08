@@ -530,6 +530,15 @@ export class GeminiAdapter implements ProviderAdapter {
   }
 
   async listModels(providerApiKey: string): Promise<OpenAIModelEntry[]> {
+    // Diagnostic: check what IP we're connecting from
+    try {
+      const ipResp = await fetch("https://api64.ipify.org");
+      const ip = await ipResp.text();
+      console.log(`[gemini:listModels] Outgoing IP from Nitro fetch: ${ip}`);
+    } catch (e) {
+      console.error("[gemini:listModels] IP check failed:", e);
+    }
+
     const url = `${GEMINI_API_BASE}/models?key=${providerApiKey}`;
     const resp = await fetch(url);
     if (!resp.ok) {
