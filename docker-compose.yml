@@ -8,6 +8,7 @@ services:
       - CONVEX_SELF_HOSTED_URL=${CONVEX_SELF_HOSTED_URL}
       - VITE_CONVEX_SITE_URL=${VITE_CONVEX_SITE_URL}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - PREFER_IPV6=${PREFER_IPV6:-false}
       - NODE_ENV=production
     restart: unless-stopped
     healthcheck:
