@@ -197,6 +197,23 @@ export const imageGenerationRequestSchema = z.object({
   user: z.string().optional(),
 });
 
+// --- Audio Speech Request Schema ---
+
+export const audioSpeechRequestSchema = z.object({
+  model: z.string().min(1),
+  input: z.string().min(1),
+  voice: z.string().min(1),
+  response_format: z.enum(["mp3", "opus", "aac", "flac", "wav", "pcm"]).optional().default("wav"),
+  speed: z.number().min(0.25).max(4.0).optional(),
+});
+
+// --- Moderation Request Schema ---
+
+export const moderationRequestSchema = z.object({
+  model: z.string().optional(),
+  input: z.union([z.string(), z.array(z.string())]),
+});
+
 // --- Dashboard Schemas ---
 
 export const generateKeySchema = z.object({
