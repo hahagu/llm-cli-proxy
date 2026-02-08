@@ -17,7 +17,7 @@ export default defineEventHandler((event) => {
     "Access-Control-Allow-Headers",
     "Content-Type, Authorization, x-api-key",
   );
-  setHeader(event, "Access-Control-Max-Age", "86400");
+  setHeader(event, "Access-Control-Max-Age", 86400);
 
   if (getMethod(event) === "OPTIONS") {
     setResponseStatus(event, 204);

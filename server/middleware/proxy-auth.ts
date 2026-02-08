@@ -45,7 +45,7 @@ export default defineEventHandler(async (event) => {
 
   if (!rateResult.allowed) {
     setResponseStatus(event, 429);
-    setHeader(event, "Retry-After", String(rateResult.resetAt - Math.ceil(Date.now() / 1000)));
+    setHeader(event, "Retry-After", rateResult.resetAt - Math.ceil(Date.now() / 1000));
     return {
       error: {
         message: "Rate limit exceeded. Try again later.",

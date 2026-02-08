@@ -134,8 +134,8 @@
               "
             />
           </div>
-          <div v-if="testResults[provider.type]" class="mt-2 text-xs" :class="testResults[provider.type].success ? 'text-green-600' : 'text-destructive'">
-            {{ testResults[provider.type].message }}
+          <div v-if="testResults[provider.type]" class="mt-2 text-xs" :class="testResults[provider.type]!.success ? 'text-green-600' : 'text-destructive'">
+            {{ testResults[provider.type]!.message }}
           </div>
           <div class="mt-auto flex gap-2 pt-4">
             <Button

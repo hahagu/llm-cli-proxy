@@ -46,5 +46,5 @@ export function dashboardFetch<T = unknown>(
     headers["Authorization"] = `Bearer ${token}`;
   }
 
-  return $fetch<T>(url, { ...opts, headers });
+  return $fetch<T>(url, { ...opts, headers }) as Promise<T>;
 }

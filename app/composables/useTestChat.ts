@@ -95,7 +95,7 @@ export function useTestChat() {
             const parsed = JSON.parse(data);
             const delta = parsed.choices?.[0]?.delta?.content;
             if (delta) {
-              messages.value[assistantIdx].content += delta;
+              messages.value[assistantIdx]!.content += delta;
             }
           } catch {
             // skip malformed JSON chunks
@@ -104,7 +104,7 @@ export function useTestChat() {
       }
 
       // Remove empty assistant message if nothing was received
-      if (!messages.value[assistantIdx].content) {
+      if (!messages.value[assistantIdx]?.content) {
         messages.value.splice(assistantIdx, 1);
         error.value = "No response received from model";
       }
