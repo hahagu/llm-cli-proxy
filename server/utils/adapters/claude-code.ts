@@ -359,7 +359,7 @@ function convertMessages(request: OpenAIChatRequest): {
   };
 }
 
-function makeEnv(oauthToken: string): Record<string, string> {
+function makeEnv(oauthToken: string, thinkingBudget?: number): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value !== undefined) {
@@ -370,6 +370,10 @@ function makeEnv(oauthToken: string): Record<string, string> {
   env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
   // Prevent the SDK from using any ambient API key
   delete (env as Record<string, string | undefined>).ANTHROPIC_API_KEY;
+  // Set thinking budget via env var (CLI checks this before the CLI flag)
+  if (thinkingBudget !== undefined) {
+    env.MAX_THINKING_TOKENS = String(thinkingBudget);
+  }
   return env;
 }
 
@@ -396,13 +400,18 @@ function buildSdkOptions(
   oauthToken: string,
   streaming: boolean,
 ) {
+  const thinkingBudget = request.thinking?.budget_tokens;
   const options: Record<string, unknown> = {
     model: request.model,
     maxTurns: 1,
     allowedTools: [],
     settingSources: [],
-    env: makeEnv(oauthToken),
+    env: makeEnv(oauthToken, thinkingBudget),
   };
+
+  if (thinkingBudget) {
+    options.maxThinkingTokens = thinkingBudget;
+  }
 
   // The SDK always prepends "You are Claude Code…" before our prompt.
   // We neutralize that identity first, then append the caller's prompt
@@ -440,6 +449,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     const requestId = generateId();
 
     let resultText = "";
+    let thinkingText = "";
     let inputTokens = 0;
     let outputTokens = 0;
 
@@ -451,6 +461,8 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
         for (const block of message.message.content) {
           if (block.type === "text") {
             resultText += block.text;
+          } else if (block.type === "thinking") {
+            thinkingText += (block as { thinking?: string }).thinking ?? "";
           } else if (block.type === "image") {
             const source = (block as Record<string, unknown>).source as
               | { type: string; media_type?: string; data?: string }
@@ -491,6 +503,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               message: {
                 role: "assistant",
                 content: parsed.textContent || null,
+                ...(thinkingText ? { reasoning_content: thinkingText } : {}),
                 tool_calls: parsed.toolCalls,
               },
               finish_reason: "tool_calls",
@@ -513,7 +526,11 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
       choices: [
         {
           index: 0,
-          message: { role: "assistant", content: resultText || null },
+          message: {
+            role: "assistant",
+            content: resultText || null,
+            ...(thinkingText ? { reasoning_content: thinkingText } : {}),
+          },
           finish_reason: "stop",
         },
       ],
@@ -586,7 +603,22 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
               if (event.type === "content_block_delta") {
                 const delta = event.delta as Record<string, unknown>;
-                if (delta?.type === "text_delta" && delta.text) {
+                if (delta?.type === "thinking_delta" && delta.thinking) {
+                  const chunk: OpenAIStreamChunk = {
+                    id: requestId,
+                    object: "chat.completion.chunk",
+                    created: nowUnix(),
+                    model,
+                    choices: [
+                      {
+                        index: 0,
+                        delta: { reasoning_content: delta.thinking as string },
+                        finish_reason: null,
+                      },
+                    ],
+                  };
+                  controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
+                } else if (delta?.type === "text_delta" && delta.text) {
                   const chunk: OpenAIStreamChunk = {
                     id: requestId,
                     object: "chat.completion.chunk",
@@ -682,6 +714,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
         try {
           let resultText = "";
+          let thinkingText = "";
           let inputTokens = 0;
           let outputTokens = 0;
 
@@ -691,12 +724,14 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           try {
             for await (const message of sdkQuery) {
               if (cancelled) break;
-              const msg = message as { type: string; subtype?: string; message?: { content: Array<{ type: string; text?: string }> }; usage?: { input_tokens: number; output_tokens: number }; errors?: string[] };
+              const msg = message as { type: string; subtype?: string; message?: { content: Array<{ type: string; text?: string; thinking?: string }> }; usage?: { input_tokens: number; output_tokens: number }; errors?: string[] };
 
               if (msg.type === "assistant") {
                 for (const block of msg.message?.content ?? []) {
                   if (block.type === "text" && block.text) {
                     resultText += block.text;
+                  } else if (block.type === "thinking" && block.thinking) {
+                    thinkingText += block.thinking;
                   } else if (block.type === "image") {
                     const source = (block as Record<string, unknown>).source as
                       | { type: string; media_type?: string; data?: string }
@@ -743,6 +778,17 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
             };
             enqueue(`data: ${JSON.stringify(roleChunk)}\n\n`);
+
+            if (thinkingText) {
+              const thinkChunk: OpenAIStreamChunk = {
+                id: requestId,
+                object: "chat.completion.chunk",
+                created: nowUnix(),
+                model,
+                choices: [{ index: 0, delta: { reasoning_content: thinkingText }, finish_reason: null }],
+              };
+              enqueue(`data: ${JSON.stringify(thinkChunk)}\n\n`);
+            }
 
             if (parsed.textContent) {
               const textChunk: OpenAIStreamChunk = {
@@ -796,6 +842,17 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
             };
             enqueue(`data: ${JSON.stringify(roleChunk)}\n\n`);
+
+            if (thinkingText) {
+              const thinkChunk: OpenAIStreamChunk = {
+                id: requestId,
+                object: "chat.completion.chunk",
+                created: nowUnix(),
+                model,
+                choices: [{ index: 0, delta: { reasoning_content: thinkingText }, finish_reason: null }],
+              };
+              enqueue(`data: ${JSON.stringify(thinkChunk)}\n\n`);
+            }
 
             if (resultText) {
               const textChunk: OpenAIStreamChunk = {
