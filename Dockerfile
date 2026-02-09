@@ -14,6 +14,7 @@ RUN bun run build
 
 # Production runner
 FROM base AS runner
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app/.output ./.output
 
