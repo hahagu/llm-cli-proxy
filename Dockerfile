@@ -10,7 +10,7 @@ RUN bun install --frozen-lockfile
 FROM base AS build
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN bun run build
+RUN --mount=type=cache,target=/app/node_modules/.cache bun run build
 
 # Production runner
 FROM base AS runner
