@@ -10,6 +10,9 @@ services:
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - PREFER_IPV6=${PREFER_IPV6:-false}
       - NODE_ENV=production
+    labels:
+      - "traefik.http.middlewares.llm-proxy-body.buffering.maxRequestBodyBytes=52428800"
+      - "traefik.http.middlewares.llm-proxy-body.buffering.maxResponseBodyBytes=52428800"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/"]
