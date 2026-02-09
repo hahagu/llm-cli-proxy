@@ -76,6 +76,12 @@ export const chatCompletionRequestSchema = z.object({
       include_usage: z.boolean().optional(),
     })
     .optional(),
+  thinking: z
+    .object({
+      type: z.literal("enabled"),
+      budget_tokens: z.number().int().positive(),
+    })
+    .optional(),
 });
 
 // --- Anthropic Messages Request Schema ---

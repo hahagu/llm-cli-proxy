@@ -55,6 +55,7 @@ export interface OpenAIChatRequest {
   n?: number;
   user?: string;
   stream_options?: { include_usage?: boolean };
+  thinking?: { type: "enabled"; budget_tokens: number };
 }
 
 // --- OpenAI Response Types ---
@@ -64,6 +65,7 @@ export interface OpenAIChoice {
   message: {
     role: "assistant";
     content: string | null;
+    reasoning_content?: string | null;
     tool_calls?: OpenAIToolCall[];
   };
   finish_reason: "stop" | "length" | "tool_calls" | "content_filter" | null;
@@ -87,6 +89,7 @@ export interface OpenAIChatResponse {
 export interface OpenAIStreamChunkDelta {
   role?: string;
   content?: string | null;
+  reasoning_content?: string | null;
   tool_calls?: Array<{
     index: number;
     id?: string;

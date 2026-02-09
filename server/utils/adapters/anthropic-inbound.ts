@@ -11,8 +11,9 @@ import { generateId, nowUnix } from "./types";
 // --- Anthropic Request Types (inbound) ---
 
 interface AnthropicContentBlock {
-  type: "text" | "image" | "tool_use" | "tool_result";
+  type: "text" | "image" | "tool_use" | "tool_result" | "thinking";
   text?: string;
+  thinking?: string;
   source?: {
     type: "base64" | "url";
     media_type?: string;
@@ -50,6 +51,7 @@ export interface AnthropicInboundRequest {
   tools?: AnthropicInboundTool[];
   tool_choice?: unknown;
   metadata?: { user_id?: string };
+  thinking?: { type: "enabled"; budget_tokens: number };
 }
 
 // --- Anthropic Response Types (outbound) ---
@@ -191,6 +193,10 @@ export function anthropicToOpenAI(req: AnthropicInboundRequest): OpenAIChatReque
     }));
   }
 
+  if (req.thinking) {
+    openAIReq.thinking = req.thinking;
+  }
+
   return openAIReq;
 }
 
@@ -216,6 +222,10 @@ export function openAIToAnthropic(
 ): AnthropicOutboundResponse {
   const choice = resp.choices[0];
   const content: AnthropicContentBlock[] = [];
+
+  if (choice?.message.reasoning_content) {
+    content.push({ type: "thinking", thinking: choice.message.reasoning_content });
+  }
 
   if (choice?.message.content) {
     content.push({ type: "text", text: choice.message.content });
@@ -259,6 +269,7 @@ export function createOpenAIToAnthropicStreamTransformer(
   let messageStartSent = false;
   let contentBlockIndex = 0;
   let currentBlockOpen = false;
+  let currentBlockType: "text" | "thinking" | "tool_use" | null = null;
 
   return new TransformStream({
     transform(sseData, controller) {
@@ -306,11 +317,35 @@ export function createOpenAIToAnthropicStreamTransformer(
         controller.enqueue(`event: message_start\ndata: ${JSON.stringify(msgStart)}\n\n`);
       }
 
+      // Handle reasoning/thinking content
+      if (choice.delta.reasoning_content !== undefined && choice.delta.reasoning_content !== null) {
+        if (!currentBlockOpen || currentBlockType !== "thinking") {
+          if (currentBlockOpen) {
+            controller.enqueue(`event: content_block_stop\ndata: {"type":"content_block_stop","index":${contentBlockIndex}}\n\n`);
+            contentBlockIndex++;
+          }
+          controller.enqueue(`event: content_block_start\ndata: {"type":"content_block_start","index":${contentBlockIndex},"content_block":{"type":"thinking","thinking":""}}\n\n`);
+          currentBlockOpen = true;
+          currentBlockType = "thinking";
+        }
+        const delta = {
+          type: "content_block_delta",
+          index: contentBlockIndex,
+          delta: { type: "thinking_delta", thinking: choice.delta.reasoning_content },
+        };
+        controller.enqueue(`event: content_block_delta\ndata: ${JSON.stringify(delta)}\n\n`);
+      }
+
       // Handle text content
       if (choice.delta.content !== undefined && choice.delta.content !== null) {
-        if (!currentBlockOpen) {
+        if (!currentBlockOpen || currentBlockType !== "text") {
+          if (currentBlockOpen) {
+            controller.enqueue(`event: content_block_stop\ndata: {"type":"content_block_stop","index":${contentBlockIndex}}\n\n`);
+            contentBlockIndex++;
+          }
           controller.enqueue(`event: content_block_start\ndata: {"type":"content_block_start","index":${contentBlockIndex},"content_block":{"type":"text","text":""}}\n\n`);
           currentBlockOpen = true;
+          currentBlockType = "text";
         }
         const delta = {
           type: "content_block_delta",
@@ -341,6 +376,7 @@ export function createOpenAIToAnthropicStreamTransformer(
             };
             controller.enqueue(`event: content_block_start\ndata: ${JSON.stringify(blockStart)}\n\n`);
             currentBlockOpen = true;
+            currentBlockType = "tool_use";
           }
           if (tc.function?.arguments) {
             const delta = {
