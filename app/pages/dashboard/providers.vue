@@ -99,7 +99,7 @@
             <div class="flex gap-2">
               <Input
                 v-model="pastedUrl"
-                placeholder="http://localhost?code=...&state=..."
+                placeholder="http://localhost:.../callback?code=...&state=..."
                 class="font-mono text-xs"
               />
               <Button
@@ -189,11 +189,15 @@ async function handleExchange() {
     } else {
       statusMessage.value = data.error || "Exchange failed.";
       statusError.value = true;
+      authUrl.value = "";
+      pastedUrl.value = "";
     }
   } catch (err: unknown) {
     const fetchErr = err as { data?: { error?: string } };
     statusMessage.value = fetchErr?.data?.error || "Failed to exchange authorization code.";
     statusError.value = true;
+    authUrl.value = "";
+    pastedUrl.value = "";
   } finally {
     exchanging.value = false;
   }
