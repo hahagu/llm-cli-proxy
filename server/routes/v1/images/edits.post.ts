@@ -36,21 +36,8 @@ function parseBase64Image(data: string): { base64: string; mimeType: string } | 
  * Open WebUI sends multipart when engine=openai, but may also send JSON.
  */
 async function parseEditRequest(event: Parameters<Parameters<typeof defineEventHandler>[0]>[0]): Promise<ParsedEditRequest> {
-  const contentType = getHeader(event, "content-type") || "";
-  console.log("[images/edits] Content-Type:", contentType);
-
   // Try multipart first
-  const formData = await readMultipartFormData(event).catch((err) => {
-    console.log("[images/edits] readMultipartFormData error:", err);
-    return null;
-  });
-
-  console.log("[images/edits] formData parts:", formData?.length ?? "null");
-  if (formData) {
-    for (const part of formData) {
-      console.log("[images/edits] part:", { name: part.name, filename: part.filename, type: part.type, dataLen: part.data?.length });
-    }
-  }
+  const formData = await readMultipartFormData(event).catch(() => null);
 
   if (formData && formData.length > 0) {
     const fields: Record<string, string> = {};
@@ -94,11 +81,9 @@ async function parseEditRequest(event: Parameters<Parameters<typeof defineEventH
   }
 
   // Fall back to JSON body (e.g., Open WebUI internal calls or other clients)
-  console.log("[images/edits] Falling back to JSON body");
   let body: Record<string, unknown>;
   try {
     body = await readBody(event) as Record<string, unknown>;
-    console.log("[images/edits] JSON body keys:", body ? Object.keys(body) : "null");
   } catch {
     throw invalidRequest("Request must be multipart/form-data or JSON");
   }
