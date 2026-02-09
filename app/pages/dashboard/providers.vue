@@ -94,7 +94,7 @@
               </Button>
             </div>
             <div class="text-sm text-muted-foreground">
-              <strong>Step 2:</strong> After authorizing, your browser will redirect to a localhost URL that won't load. Open your browser's DevTools Network tab to find the redirect URL and paste it below.
+              <strong>Step 2:</strong> After authorizing, wait for your browser to redirect. It will show an error page — that's expected. Copy the full URL from the address bar and paste it below.
             </div>
             <div class="flex gap-2">
               <Input
