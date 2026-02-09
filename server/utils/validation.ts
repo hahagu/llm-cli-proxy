@@ -86,7 +86,7 @@ export const chatCompletionRequestSchema = z.object({
   reasoning_effort: z
     .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
     .optional(),
-});
+}).passthrough();
 
 // --- Anthropic Messages Request Schema ---
 
@@ -183,7 +183,7 @@ export const completionRequestSchema = z.object({
   presence_penalty: z.number().min(-2).max(2).optional(),
   n: z.number().int().positive().optional(),
   user: z.string().optional(),
-});
+}).passthrough();
 
 // --- Dashboard Schemas ---
 
