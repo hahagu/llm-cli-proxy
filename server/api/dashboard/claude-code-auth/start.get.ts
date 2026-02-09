@@ -22,6 +22,7 @@ export default defineEventHandler(async (event) => {
     codeVerifier,
     state,
     userId: session.userId,
+    redirectUri,
   }), {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
@@ -31,7 +32,8 @@ export default defineEventHandler(async (event) => {
   });
 
   const clientId = getClientId();
-  const redirectUri = "http://localhost";
+  const port = 55000 + Math.floor(Math.random() * 10000);
+  const redirectUri = `http://localhost:${port}`;
 
   const params = new URLSearchParams({
     response_type: "code",

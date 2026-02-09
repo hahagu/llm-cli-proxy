@@ -2,7 +2,6 @@ import { storeTokensForUser, getClientId } from "~~/server/utils/claude-code-oau
 import { validateDashboardSession } from "~~/server/utils/dashboard-auth";
 
 const TOKEN_URL = "https://console.anthropic.com/v1/oauth/token";
-const REDIRECT_URI = "http://localhost";
 
 export default defineEventHandler(async (event) => {
   const session = await validateDashboardSession(event);
@@ -43,7 +42,7 @@ export default defineEventHandler(async (event) => {
     return { error: "Authorization session expired. Please start the process again." };
   }
 
-  let pkceData: { codeVerifier: string; state: string; userId: string };
+  let pkceData: { codeVerifier: string; state: string; userId: string; redirectUri: string };
   try {
     pkceData = JSON.parse(pkceCookie);
   } catch {
@@ -79,7 +78,7 @@ export default defineEventHandler(async (event) => {
         grant_type: "authorization_code",
         code: cleanCode,
         state,
-        redirect_uri: REDIRECT_URI,
+        redirect_uri: pkceData.redirectUri,
         client_id: getClientId(),
         code_verifier: pkceData.codeVerifier,
       }),
