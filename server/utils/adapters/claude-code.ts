@@ -414,10 +414,6 @@ function buildSdkOptions(
     options.includePartialMessages = true;
   }
 
-  if (request.thinking) {
-    options.maxThinkingTokens = request.thinking.budget_tokens;
-  }
-
   return options;
 }
 
@@ -444,7 +440,6 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     const requestId = generateId();
 
     let resultText = "";
-    let thinkingText = "";
     let inputTokens = 0;
     let outputTokens = 0;
 
@@ -454,10 +449,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     })) {
       if (message.type === "assistant") {
         for (const block of message.message.content) {
-          if (block.type === "thinking") {
-            const thinking = (block as Record<string, unknown>).thinking;
-            if (typeof thinking === "string") thinkingText += thinking;
-          } else if (block.type === "text") {
+          if (block.type === "text") {
             resultText += block.text;
           } else if (block.type === "image") {
             const source = (block as Record<string, unknown>).source as
@@ -499,7 +491,6 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               message: {
                 role: "assistant",
                 content: parsed.textContent || null,
-                ...(thinkingText ? { reasoning_content: thinkingText } : {}),
                 tool_calls: parsed.toolCalls,
               },
               finish_reason: "tool_calls",
@@ -522,11 +513,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
       choices: [
         {
           index: 0,
-          message: {
-            role: "assistant",
-            content: resultText || null,
-            ...(thinkingText ? { reasoning_content: thinkingText } : {}),
-          },
+          message: { role: "assistant", content: resultText || null },
           finish_reason: "stop",
         },
       ],
@@ -599,22 +586,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
               if (event.type === "content_block_delta") {
                 const delta = event.delta as Record<string, unknown>;
-                if (delta?.type === "thinking_delta" && delta.thinking) {
-                  const chunk: OpenAIStreamChunk = {
-                    id: requestId,
-                    object: "chat.completion.chunk",
-                    created: nowUnix(),
-                    model,
-                    choices: [
-                      {
-                        index: 0,
-                        delta: { reasoning_content: delta.thinking as string },
-                        finish_reason: null,
-                      },
-                    ],
-                  };
-                  controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
-                } else if (delta?.type === "text_delta" && delta.text) {
+                if (delta?.type === "text_delta" && delta.text) {
                   const chunk: OpenAIStreamChunk = {
                     id: requestId,
                     object: "chat.completion.chunk",
@@ -710,42 +682,46 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
         try {
           let resultText = "";
-          let thinkingText = "";
           let inputTokens = 0;
           let outputTokens = 0;
 
-          for await (const message of sdkQuery) {
-            if (cancelled) break;
-            const msg = message as { type: string; subtype?: string; message?: { content: Array<{ type: string; text?: string; thinking?: string }> }; usage?: { input_tokens: number; output_tokens: number }; errors?: string[] };
+          // Send keepalive comments every 5s to prevent client timeout
+          const keepalive = setInterval(() => enqueue(": keepalive\n\n"), 5000);
 
-            if (msg.type === "assistant") {
-              for (const block of msg.message?.content ?? []) {
-                if (block.type === "thinking" && block.thinking) {
-                  thinkingText += block.thinking;
-                } else if (block.type === "text" && block.text) {
-                  resultText += block.text;
-                } else if (block.type === "image") {
-                  const source = (block as Record<string, unknown>).source as
-                    | { type: string; media_type?: string; data?: string }
-                    | undefined;
-                  if (source?.type === "base64" && source.data) {
-                    const mimeType = source.media_type ?? "image/png";
-                    resultText += `![image](data:${mimeType};base64,${source.data})`;
+          try {
+            for await (const message of sdkQuery) {
+              if (cancelled) break;
+              const msg = message as { type: string; subtype?: string; message?: { content: Array<{ type: string; text?: string }> }; usage?: { input_tokens: number; output_tokens: number }; errors?: string[] };
+
+              if (msg.type === "assistant") {
+                for (const block of msg.message?.content ?? []) {
+                  if (block.type === "text" && block.text) {
+                    resultText += block.text;
+                  } else if (block.type === "image") {
+                    const source = (block as Record<string, unknown>).source as
+                      | { type: string; media_type?: string; data?: string }
+                      | undefined;
+                    if (source?.type === "base64" && source.data) {
+                      const mimeType = source.media_type ?? "image/png";
+                      resultText += `![image](data:${mimeType};base64,${source.data})`;
+                    }
                   }
                 }
               }
-            }
 
-            if (msg.type === "result") {
-              if (msg.subtype === "success") {
-                inputTokens = msg.usage?.input_tokens ?? 0;
-                outputTokens = msg.usage?.output_tokens ?? 0;
-              } else {
-                throw providerError(
-                  `Claude Code error: ${msg.errors?.join("; ") || msg.subtype}`,
-                );
+              if (msg.type === "result") {
+                if (msg.subtype === "success") {
+                  inputTokens = msg.usage?.input_tokens ?? 0;
+                  outputTokens = msg.usage?.output_tokens ?? 0;
+                } else {
+                  throw providerError(
+                    `Claude Code error: ${msg.errors?.join("; ") || msg.subtype}`,
+                  );
+                }
               }
             }
+          } finally {
+            clearInterval(keepalive);
           }
 
           if (cancelled) return;
@@ -754,19 +730,6 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
             prompt_tokens: inputTokens,
             completion_tokens: outputTokens,
             total_tokens: inputTokens + outputTokens,
-          };
-
-          // Helper to emit a thinking chunk if thinking was captured
-          const emitThinking = () => {
-            if (!thinkingText) return;
-            const chunk: OpenAIStreamChunk = {
-              id: requestId,
-              object: "chat.completion.chunk",
-              created: nowUnix(),
-              model,
-              choices: [{ index: 0, delta: { reasoning_content: thinkingText }, finish_reason: null }],
-            };
-            enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
           };
 
           // Try to parse tool calls from the buffered response
@@ -780,8 +743,6 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
             };
             enqueue(`data: ${JSON.stringify(roleChunk)}\n\n`);
-
-            emitThinking();
 
             if (parsed.textContent) {
               const textChunk: OpenAIStreamChunk = {
@@ -835,8 +796,6 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
             };
             enqueue(`data: ${JSON.stringify(roleChunk)}\n\n`);
-
-            emitThinking();
 
             if (resultText) {
               const textChunk: OpenAIStreamChunk = {
