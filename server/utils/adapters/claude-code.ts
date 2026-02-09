@@ -668,14 +668,25 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     model: string,
     includeUsage = false,
   ): ReadableStream<string> {
+    let cancelled = false;
     return new ReadableStream<string>({
       async start(controller) {
+        const enqueue = (data: string) => {
+          if (cancelled) return;
+          try { controller.enqueue(data); } catch { cancelled = true; }
+        };
+        const close = () => {
+          if (cancelled) return;
+          try { controller.close(); } catch { cancelled = true; }
+        };
+
         try {
           let resultText = "";
           let inputTokens = 0;
           let outputTokens = 0;
 
           for await (const message of sdkQuery) {
+            if (cancelled) break;
             const msg = message as { type: string; subtype?: string; message?: { content: Array<{ type: string; text?: string }> }; usage?: { input_tokens: number; output_tokens: number }; errors?: string[] };
 
             if (msg.type === "assistant") {
@@ -706,6 +717,8 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
             }
           }
 
+          if (cancelled) return;
+
           const usage = {
             prompt_tokens: inputTokens,
             completion_tokens: outputTokens,
@@ -715,7 +728,6 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           // Try to parse tool calls from the buffered response
           const parsed = parseToolCallsFromText(resultText);
           if (parsed && parsed.toolCalls.length > 0) {
-            // Emit role chunk
             const roleChunk: OpenAIStreamChunk = {
               id: requestId,
               object: "chat.completion.chunk",
@@ -723,9 +735,8 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               model,
               choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
             };
-            controller.enqueue(`data: ${JSON.stringify(roleChunk)}\n\n`);
+            enqueue(`data: ${JSON.stringify(roleChunk)}\n\n`);
 
-            // Emit text content if any
             if (parsed.textContent) {
               const textChunk: OpenAIStreamChunk = {
                 id: requestId,
@@ -734,10 +745,9 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                 model,
                 choices: [{ index: 0, delta: { content: parsed.textContent }, finish_reason: null }],
               };
-              controller.enqueue(`data: ${JSON.stringify(textChunk)}\n\n`);
+              enqueue(`data: ${JSON.stringify(textChunk)}\n\n`);
             }
 
-            // Emit tool calls
             for (let i = 0; i < parsed.toolCalls.length; i++) {
               const tc = parsed.toolCalls[i]!;
               const toolChunk: OpenAIStreamChunk = {
@@ -758,10 +768,9 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                   finish_reason: null,
                 }],
               };
-              controller.enqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
+              enqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
             }
 
-            // Emit finish chunk with tool_calls reason
             const finishChunk: OpenAIStreamChunk = {
               id: requestId,
               object: "chat.completion.chunk",
@@ -770,9 +779,8 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
               ...(includeUsage ? { usage } : {}),
             };
-            controller.enqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
+            enqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
           } else {
-            // No tool calls found — emit the text as normal streaming chunks
             const roleChunk: OpenAIStreamChunk = {
               id: requestId,
               object: "chat.completion.chunk",
@@ -780,7 +788,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               model,
               choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
             };
-            controller.enqueue(`data: ${JSON.stringify(roleChunk)}\n\n`);
+            enqueue(`data: ${JSON.stringify(roleChunk)}\n\n`);
 
             if (resultText) {
               const textChunk: OpenAIStreamChunk = {
@@ -790,7 +798,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                 model,
                 choices: [{ index: 0, delta: { content: resultText }, finish_reason: null }],
               };
-              controller.enqueue(`data: ${JSON.stringify(textChunk)}\n\n`);
+              enqueue(`data: ${JSON.stringify(textChunk)}\n\n`);
             }
 
             const finishChunk: OpenAIStreamChunk = {
@@ -801,15 +809,20 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
               ...(includeUsage ? { usage } : {}),
             };
-            controller.enqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
+            enqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
           }
 
-          controller.enqueue("data: [DONE]\n\n");
-          controller.close();
+          enqueue("data: [DONE]\n\n");
+          close();
         } catch (err) {
-          console.error("[STREAM-TOOLS] error during streaming:", err);
-          controller.error(err);
+          if (!cancelled) {
+            console.error("[STREAM-TOOLS] error during streaming:", err);
+            try { controller.error(err); } catch { /* already closed */ }
+          }
         }
+      },
+      cancel() {
+        cancelled = true;
       },
     });
   }
