@@ -133,7 +133,7 @@ const colorMode = useColorMode();
 
 const navItems = [
   { to: "/dashboard", label: "Overview", icon: LayoutDashboard },
-  { to: "/dashboard/providers", label: "Providers", icon: Settings },
+  { to: "/dashboard/providers", label: "Provider", icon: Settings },
   { to: "/dashboard/api-keys", label: "API Keys", icon: KeyRound },
   {
     to: "/dashboard/system-prompts",

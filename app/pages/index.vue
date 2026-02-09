@@ -20,7 +20,7 @@
             LLM Proxy
           </h1>
           <p class="text-sm text-muted-foreground">
-            Route LLM requests across multiple providers with a unified API.
+            Proxy LLM requests through Claude Code with a unified API.
           </p>
         </div>
 

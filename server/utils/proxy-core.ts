@@ -1,6 +1,5 @@
 import { getConvexClient } from "./convex";
-import { decrypt } from "./crypto";
-import { getAdapter, parseModelWithProvider } from "./adapters";
+import { getAdapter } from "./adapters";
 import { getAccessTokenForUser, isConfiguredForUser } from "./claude-code-oauth";
 import { api, internal } from "~~/convex/_generated/api";
 import type { OpenAIChatRequest, OpenAIChatResponse } from "./adapters/types";
@@ -13,34 +12,12 @@ export interface ProxyKeyData {
   rateLimitPerMinute: number | null;
 }
 
-async function getProviderCredentials(
-  userId: string,
-  providerType: string,
-): Promise<{ apiKey: string } | null> {
-  // claude-code uses per-user OAuth
-  if (providerType === "claude-code") {
-    const configured = await isConfiguredForUser(userId);
-    if (!configured) return null;
-    try {
-      const token = await getAccessTokenForUser(userId);
-      return { apiKey: token };
-    } catch {
-      return null;
-    }
+async function getCredentials(userId: string): Promise<string> {
+  const configured = await isConfiguredForUser(userId);
+  if (!configured) {
+    throw providerError("Claude Code OAuth not configured for this user.");
   }
-
-  const convex = getConvexClient();
-  const provider = await convex.query(api.providers.queries.getByUserAndType, {
-    userId,
-    type: providerType as "gemini" | "openrouter",
-  });
-  if (!provider) return null;
-  try {
-    const apiKey = decrypt(provider.encryptedApiKey, provider.keyIv);
-    return { apiKey };
-  } catch {
-    return null;
-  }
+  return getAccessTokenForUser(userId);
 }
 
 /**
@@ -84,7 +61,6 @@ async function applySystemPromptHierarchy(
 
 async function logUsage(
   keyData: ProxyKeyData,
-  providerType: string,
   model: string,
   statusCode: number,
   latencyMs: number,
@@ -96,7 +72,7 @@ async function logUsage(
     await convex.mutation(internal.usageLogs.mutations.insert as any, {
       userId: keyData.userId,
       apiKeyId: keyData.id,
-      providerType,
+      providerType: "claude-code",
       model,
       inputTokens: usage?.prompt_tokens,
       outputTokens: usage?.completion_tokens,
@@ -113,20 +89,16 @@ export interface ProxyResult {
   type: "json" | "stream";
   data?: OpenAIChatResponse;
   stream?: ReadableStream<string>;
-  providerType: string;
   model: string;
 }
 
 function sanitizeError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
-  // Strip anything that looks like an API key or auth token
   return msg
     .replace(/sk-[a-zA-Z0-9]{10,}/g, "sk-***")
     .replace(/key-[a-zA-Z0-9]{10,}/g, "key-***")
-    .replace(/AIza[a-zA-Z0-9_-]{30,}/g, "AIza***")
     .replace(/Bearer\s+[^\s]+/gi, "Bearer ***")
-    .replace(/x-api-key:\s*[^\s,]+/gi, "x-api-key: ***")
-    .replace(/[?&]key=[^&\s]+/gi, "?key=***");
+    .replace(/x-api-key:\s*[^\s,]+/gi, "x-api-key: ***");
 }
 
 export async function executeProxyRequest(
@@ -138,41 +110,28 @@ export async function executeProxyRequest(
   // Apply system prompt hierarchy for the requested model
   const requestWithPrompt = await applySystemPromptHierarchy(request, keyData.userId);
 
-  // Detect provider from the model name (supports "provider:model" prefix format)
-  const parsed = parseModelWithProvider(requestWithPrompt.model);
-  if (!parsed) {
-    logUsage(keyData, "none", request.model, 400, Date.now() - startTime, undefined, "Unknown model provider");
-    throw invalidRequest(`Cannot determine provider for model: ${request.model}`, "model");
-  }
-  const { provider: providerType, model: rawModel } = parsed;
+  const model = requestWithPrompt.model;
 
-  // Replace the prefixed model with the raw model ID for the upstream API
-  const upstreamRequest = { ...requestWithPrompt, model: rawModel };
-
-  const creds = await getProviderCredentials(keyData.userId, providerType);
-  if (!creds) {
-    logUsage(keyData, providerType, rawModel, 502, Date.now() - startTime, undefined, "No credentials configured");
-    throw providerError(`No credentials configured for provider ${providerType}`);
+  let token: string;
+  try {
+    token = await getCredentials(keyData.userId);
+  } catch {
+    logUsage(keyData, model, 502, Date.now() - startTime, undefined, "No credentials configured");
+    throw providerError("Claude Code OAuth not configured for this user.");
   }
 
   try {
-    const adapter = getAdapter(providerType);
+    const adapter = getAdapter();
 
-    if (upstreamRequest.stream) {
-      const stream = await adapter.stream(upstreamRequest, creds.apiKey);
-      logUsage(keyData, providerType, rawModel, 200, Date.now() - startTime);
-      return {
-        type: "stream",
-        stream,
-        providerType: providerType,
-        model: rawModel,
-      };
+    if (requestWithPrompt.stream) {
+      const stream = await adapter.stream(requestWithPrompt, token);
+      logUsage(keyData, model, 200, Date.now() - startTime);
+      return { type: "stream", stream, model };
     } else {
-      const data = await adapter.complete(upstreamRequest, creds.apiKey);
+      const data = await adapter.complete(requestWithPrompt, token);
       logUsage(
         keyData,
-        providerType,
-        rawModel,
+        model,
         200,
         Date.now() - startTime,
         data.usage
@@ -182,21 +141,15 @@ export async function executeProxyRequest(
             }
           : undefined,
       );
-      return {
-        type: "json",
-        data,
-        providerType: providerType,
-        model: rawModel,
-      };
+      return { type: "json", data, model };
     }
   } catch (err) {
-    // Preserve structured OpenAIError instances from adapters
     if (err instanceof OpenAIError) {
-      logUsage(keyData, providerType, rawModel, err.statusCode, Date.now() - startTime, undefined, err.message);
+      logUsage(keyData, model, err.statusCode, Date.now() - startTime, undefined, err.message);
       throw err;
     }
     const safeError = sanitizeError(err);
-    logUsage(keyData, providerType, rawModel, 502, Date.now() - startTime, undefined, safeError);
-    throw providerError(`Provider ${providerType} failed: ${safeError}`);
+    logUsage(keyData, model, 502, Date.now() - startTime, undefined, safeError);
+    throw providerError(`Provider failed: ${safeError}`);
   }
 }

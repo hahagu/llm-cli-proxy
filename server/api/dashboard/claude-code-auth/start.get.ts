@@ -31,7 +31,7 @@ export default defineEventHandler(async (event) => {
   });
 
   const clientId = getClientId();
-  const redirectUri = getRequestURL(event).origin + "/callback";
+  const redirectUri = "http://localhost";
 
   const params = new URLSearchParams({
     response_type: "code",

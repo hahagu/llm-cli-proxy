@@ -41,8 +41,7 @@
                 :key="m.id"
                 :value="m.id"
               >
-                {{ m.id }}
-                <span class="text-muted-foreground"> ({{ m.provider }})</span>
+                {{ m.name || m.id }}
               </SelectItem>
             </SelectContent>
           </Select>

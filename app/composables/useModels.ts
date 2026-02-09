@@ -1,16 +1,15 @@
 import { dashboardFetch } from "~/utils/dashboard-fetch";
 
 export function useModels() {
-  const models = ref<Array<{ id: string; provider: string; owned_by: string }>>([]);
+  const models = ref<Array<{ id: string; owned_by: string; name?: string }>>([]);
   const loading = ref(false);
 
-  async function fetchModels(providerType?: string) {
+  async function fetchModels() {
     loading.value = true;
     try {
-      const params = providerType ? `?providerType=${providerType}` : "";
       const data = await dashboardFetch<{
-        models: Array<{ id: string; provider: string; owned_by: string }>;
-      }>(`/api/dashboard/models${params}`);
+        models: Array<{ id: string; owned_by: string; name?: string }>;
+      }>("/api/dashboard/models");
       models.value = data.models;
     } catch (err) {
       console.error("Failed to fetch models:", err);
@@ -20,9 +19,5 @@ export function useModels() {
     }
   }
 
-  function getModelsForProvider(providerType: string) {
-    return models.value.filter((m) => m.provider === providerType);
-  }
-
-  return { models, loading, fetchModels, getModelsForProvider };
+  return { models, loading, fetchModels };
 }

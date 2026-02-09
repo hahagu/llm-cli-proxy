@@ -10,12 +10,12 @@
     <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
       <Card>
         <CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle class="text-sm font-medium">Providers</CardTitle>
+          <CardTitle class="text-sm font-medium">Claude Code</CardTitle>
           <Settings class="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div class="text-2xl font-bold">{{ providerCount }}</div>
-          <p class="text-xs text-muted-foreground">configured</p>
+          <div class="text-2xl font-bold">{{ claudeCodeAvailable ? "Connected" : "Not connected" }}</div>
+          <p class="text-xs text-muted-foreground">OAuth status</p>
         </CardContent>
       </Card>
 
@@ -59,7 +59,7 @@
           <div
             class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold"
             :class="
-              providerCount > 0
+              claudeCodeAvailable
                 ? 'bg-primary text-primary-foreground'
                 : 'bg-muted text-muted-foreground'
             "
@@ -67,9 +67,9 @@
             1
           </div>
           <div>
-            <p class="text-sm font-medium">Configure a Provider</p>
+            <p class="text-sm font-medium">Connect Claude Code</p>
             <p class="text-xs text-muted-foreground">
-              Authenticate with Claude Code, or add API keys for Gemini or OpenRouter.
+              Authenticate with your Claude account.
             </p>
           </div>
         </NuxtLink>
@@ -123,21 +123,15 @@
 <script setup lang="ts">
 import { KeyRound, Settings, MessageSquare } from "lucide-vue-next";
 import { useApiKeys } from "~/composables/useApiKeys";
-import { useProviders } from "~/composables/useProviders";
 import { useSystemPrompts } from "~/composables/useSystemPrompts";
 import { dashboardFetch } from "~/utils/dashboard-fetch";
 
 definePageMeta({ layout: "dashboard" });
 
 const { keys, fetchKeys } = useApiKeys();
-const { providers, fetchProviders } = useProviders();
 const { prompts, fetchPrompts } = useSystemPrompts();
 
 const claudeCodeAvailable = ref(false);
-
-const providerCount = computed(
-  () => providers.value.length + (claudeCodeAvailable.value ? 1 : 0),
-);
 
 const activeKeyCount = computed(
   () => keys.value.filter((k) => k.isActive).length,
@@ -145,7 +139,6 @@ const activeKeyCount = computed(
 
 onMounted(() => {
   fetchKeys();
-  fetchProviders();
   fetchPrompts();
   dashboardFetch<{ configured: boolean }>("/api/dashboard/claude-code-status")
     .then((data) => { claudeCodeAvailable.value = data.configured; })

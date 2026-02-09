@@ -175,57 +175,9 @@ export const completionRequestSchema = z.object({
   user: z.string().optional(),
 });
 
-// --- Embeddings Request Schema ---
-
-export const embeddingRequestSchema = z.object({
-  model: z.string().min(1),
-  input: z.union([z.string(), z.array(z.string())]),
-  encoding_format: z.enum(["float", "base64"]).optional(),
-  user: z.string().optional(),
-});
-
-// --- Image Generation Request Schema ---
-
-export const imageGenerationRequestSchema = z.object({
-  model: z.string().min(1),
-  prompt: z.string().min(1),
-  n: z.number().int().min(1).max(10).optional().default(1),
-  size: z.string().optional(),
-  quality: z.enum(["standard", "hd"]).optional(),
-  response_format: z.enum(["url", "b64_json"]).optional().default("b64_json"),
-  style: z.enum(["vivid", "natural"]).optional(),
-  user: z.string().optional(),
-});
-
-// --- Audio Speech Request Schema ---
-
-export const audioSpeechRequestSchema = z.object({
-  model: z.string().min(1),
-  input: z.string().min(1),
-  voice: z.string().min(1),
-  response_format: z.enum(["mp3", "opus", "aac", "flac", "wav", "pcm"]).optional().default("wav"),
-  speed: z.number().min(0.25).max(4.0).optional(),
-});
-
-// --- Moderation Request Schema ---
-
-export const moderationRequestSchema = z.object({
-  model: z.string().optional(),
-  input: z.union([z.string(), z.array(z.string())]),
-});
-
 // --- Dashboard Schemas ---
 
 export const generateKeySchema = z.object({
   name: z.string().min(1).max(100),
   rateLimitPerMinute: z.number().int().positive().optional(),
-});
-
-export const createProviderSchema = z.object({
-  type: z.enum(["claude-code", "gemini", "openrouter"]),
-  apiKey: z.string().min(1),
-});
-
-export const updateProviderSchema = z.object({
-  apiKey: z.string().min(1).optional(),
 });
