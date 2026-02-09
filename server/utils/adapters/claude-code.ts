@@ -486,10 +486,14 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     let inputTokens = 0;
     let outputTokens = 0;
 
+    const sdkOptions = buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, false);
+    console.log("[THINKING-DEBUG] complete() thinkingBudget:", sdkOptions.maxThinkingTokens, "env MAX_THINKING_TOKENS:", (sdkOptions.env as Record<string, string>)?.MAX_THINKING_TOKENS);
+
     for await (const message of query({
       prompt: prompt as string,
-      options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, false),
+      options: sdkOptions,
     })) {
+      console.log("[THINKING-DEBUG] complete() message.type:", message.type, message.type === "assistant" ? "blocks:" + JSON.stringify((message.message?.content ?? []).map((b: Record<string, unknown>) => b.type)) : "");
       if (message.type === "assistant") {
         for (const block of message.message.content) {
           if (block.type === "text") {
@@ -610,6 +614,11 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           for await (const message of sdkQuery) {
             if (message.type === "stream_event") {
               const event = message.event as Record<string, unknown>;
+              // Debug: log all stream event types and delta types
+              if (event.type === "content_block_start" || event.type === "content_block_delta") {
+                const delta = (event.delta ?? event.content_block) as Record<string, unknown> | undefined;
+                console.log("[THINKING-DEBUG] stream event:", event.type, "delta/block type:", delta?.type);
+              }
 
               if (event.type === "message_start" && !sentRole) {
                 sentRole = true;
