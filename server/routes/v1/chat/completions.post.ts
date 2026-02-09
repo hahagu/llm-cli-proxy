@@ -33,8 +33,10 @@ export default defineEventHandler(async (event) => {
     };
   }
 
+  console.log("[COMPLETIONS] validating...");
   const parsed = chatCompletionRequestSchema.safeParse(rawBody);
   if (!parsed.success) {
+    console.log("[COMPLETIONS] validation failed:", parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "));
     setResponseStatus(event, 400);
     return {
       error: {
@@ -44,11 +46,13 @@ export default defineEventHandler(async (event) => {
       },
     };
   }
+  console.log("[COMPLETIONS] validation OK, calling executeProxyRequest...");
 
   const body = parsed.data as OpenAIChatRequest;
 
   try {
     const result = await executeProxyRequest(body, keyData);
+    console.log(`[COMPLETIONS] executeProxyRequest returned, type=${result.type}`);
 
     if (result.type === "stream" && result.stream) {
       setHeader(event, "Content-Type", "text/event-stream");
