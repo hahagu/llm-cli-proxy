@@ -78,9 +78,13 @@ export const chatCompletionRequestSchema = z.object({
     .optional(),
   thinking: z
     .object({
-      type: z.literal("enabled"),
-      budget_tokens: z.number().int().positive(),
+      type: z.string().optional(),
+      budget_tokens: z.number().int().positive().optional(),
     })
+    .passthrough()
+    .optional(),
+  reasoning_effort: z
+    .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
     .optional(),
 });
 

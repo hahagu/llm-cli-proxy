@@ -393,6 +393,39 @@ function translateStopReason(
   }
 }
 
+/** Map OpenAI reasoning_effort to an approximate thinking budget. */
+const REASONING_EFFORT_BUDGETS: Record<string, number> = {
+  minimal: 1024,
+  low: 2048,
+  medium: 4096,
+  high: 8192,
+  xhigh: 16384,
+};
+
+/** Resolve thinking budget from request (thinking.budget_tokens takes priority, then reasoning_effort). */
+function resolveThinkingBudget(request: OpenAIChatRequest): number | undefined {
+  // Explicit Anthropic-style thinking with budget_tokens takes priority
+  if (
+    request.thinking?.type === "enabled" &&
+    request.thinking.budget_tokens &&
+    request.thinking.budget_tokens > 0
+  ) {
+    return request.thinking.budget_tokens;
+  }
+
+  // If thinking is present but type is not "enabled", don't enable thinking
+  if (request.thinking && request.thinking.type && request.thinking.type !== "enabled") {
+    return undefined;
+  }
+
+  // Fall back to OpenAI-style reasoning_effort
+  if (request.reasoning_effort && request.reasoning_effort !== "none") {
+    return REASONING_EFFORT_BUDGETS[request.reasoning_effort] ?? 4096;
+  }
+
+  return undefined;
+}
+
 function buildSdkOptions(
   request: OpenAIChatRequest,
   systemPrompt: string | undefined,
@@ -400,7 +433,7 @@ function buildSdkOptions(
   oauthToken: string,
   streaming: boolean,
 ) {
-  const thinkingBudget = request.thinking?.budget_tokens;
+  const thinkingBudget = resolveThinkingBudget(request);
   const options: Record<string, unknown> = {
     model: request.model,
     maxTurns: 1,

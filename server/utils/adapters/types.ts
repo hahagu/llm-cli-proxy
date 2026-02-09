@@ -55,7 +55,8 @@ export interface OpenAIChatRequest {
   n?: number;
   user?: string;
   stream_options?: { include_usage?: boolean };
-  thinking?: { type: "enabled"; budget_tokens: number };
+  thinking?: { type?: string; budget_tokens?: number; [key: string]: unknown };
+  reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 }
 
 // --- OpenAI Response Types ---
