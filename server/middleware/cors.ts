@@ -6,6 +6,8 @@
  */
 export default defineEventHandler((event) => {
   const path = getRequestURL(event).pathname;
+  const method = getMethod(event);
+  console.log(`[REQ] ${method} ${path} content-length=${getHeader(event, "content-length") ?? "none"} transfer-encoding=${getHeader(event, "transfer-encoding") ?? "none"}`);
   if (!path.startsWith("/v1/")) return;
 
   const allowedOrigins = process.env.CORS_ALLOWED_ORIGINS ?? "*";
