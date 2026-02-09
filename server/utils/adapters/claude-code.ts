@@ -601,16 +601,11 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
       options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, true),
     });
 
-    // When tools are present, we buffer the full response and emit tool_calls
-    // at the end (since we need the complete text to parse the JSON block)
-    if (hasTools) {
-      return this._streamWithToolParsing(sdkQuery, requestId, model, includeUsage);
-    }
-
     return new ReadableStream<string>({
       async start(controller) {
         try {
           let sentRole = false;
+          let bufferedText = "";
 
           for await (const message of sdkQuery) {
             if (message.type === "stream_event") {
@@ -652,6 +647,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                   };
                   controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
                 } else if (delta?.type === "text_delta" && delta.text) {
+                  if (hasTools) bufferedText += delta.text as string;
                   const chunk: OpenAIStreamChunk = {
                     id: requestId,
                     object: "chat.completion.chunk",
@@ -671,9 +667,42 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
               if (event.type === "message_delta") {
                 const delta = event.delta as Record<string, unknown>;
-                const stopReason = translateStopReason(
+                let stopReason = translateStopReason(
                   delta?.stop_reason as string | null,
                 );
+
+                // If tools were requested, try to parse tool calls from buffered text
+                let parsedTools: ReturnType<typeof parseToolCallsFromText> = null;
+                if (hasTools && bufferedText) {
+                  parsedTools = parseToolCallsFromText(bufferedText);
+                  if (parsedTools && parsedTools.toolCalls.length > 0) {
+                    // Emit tool call chunks before the finish chunk
+                    for (let i = 0; i < parsedTools.toolCalls.length; i++) {
+                      const tc = parsedTools.toolCalls[i]!;
+                      const toolChunk: OpenAIStreamChunk = {
+                        id: requestId,
+                        object: "chat.completion.chunk",
+                        created: nowUnix(),
+                        model,
+                        choices: [{
+                          index: 0,
+                          delta: {
+                            tool_calls: [{
+                              index: i,
+                              id: tc.id,
+                              type: "function",
+                              function: { name: tc.function.name, arguments: tc.function.arguments },
+                            }],
+                          },
+                          finish_reason: null,
+                        }],
+                      };
+                      controller.enqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
+                    }
+                    stopReason = "tool_calls";
+                  }
+                }
+
                 const chunk: OpenAIStreamChunk = {
                   id: requestId,
                   object: "chat.completion.chunk",
@@ -718,208 +747,6 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           console.error("[STREAM] error during streaming:", err);
           controller.error(err);
         }
-      },
-    });
-  }
-
-  /**
-   * Stream with tool call parsing: buffer the full response, then emit
-   * either text chunks or tool_calls depending on whether the model
-   * output a tool call JSON block.
-   */
-  private _streamWithToolParsing(
-    sdkQuery: AsyncIterable<Record<string, unknown>>,
-    requestId: string,
-    model: string,
-    includeUsage = false,
-  ): ReadableStream<string> {
-    let cancelled = false;
-    return new ReadableStream<string>({
-      async start(controller) {
-        const enqueue = (data: string) => {
-          if (cancelled) return;
-          try { controller.enqueue(data); } catch { cancelled = true; }
-        };
-        const close = () => {
-          if (cancelled) return;
-          try { controller.close(); } catch { cancelled = true; }
-        };
-
-        try {
-          let resultText = "";
-          let thinkingText = "";
-          let inputTokens = 0;
-          let outputTokens = 0;
-
-          // Send keepalive comments every 5s to prevent client timeout
-          const keepalive = setInterval(() => enqueue(": keepalive\n\n"), 5000);
-
-          try {
-            for await (const message of sdkQuery) {
-              if (cancelled) break;
-              const msg = message as { type: string; subtype?: string; message?: { content: Array<{ type: string; text?: string; thinking?: string }> }; usage?: { input_tokens: number; output_tokens: number }; errors?: string[] };
-
-              if (msg.type === "assistant") {
-                for (const block of msg.message?.content ?? []) {
-                  if (block.type === "text" && block.text) {
-                    resultText += block.text;
-                  } else if (block.type === "thinking" && block.thinking) {
-                    thinkingText += block.thinking;
-                  } else if (block.type === "image") {
-                    const source = (block as Record<string, unknown>).source as
-                      | { type: string; media_type?: string; data?: string }
-                      | undefined;
-                    if (source?.type === "base64" && source.data) {
-                      const mimeType = source.media_type ?? "image/png";
-                      resultText += `![image](data:${mimeType};base64,${source.data})`;
-                    }
-                  }
-                }
-              }
-
-              if (msg.type === "result") {
-                if (msg.subtype === "success") {
-                  inputTokens = msg.usage?.input_tokens ?? 0;
-                  outputTokens = msg.usage?.output_tokens ?? 0;
-                } else {
-                  throw providerError(
-                    `Claude Code error: ${msg.errors?.join("; ") || msg.subtype}`,
-                  );
-                }
-              }
-            }
-          } finally {
-            clearInterval(keepalive);
-          }
-
-          if (cancelled) return;
-
-          const usage = {
-            prompt_tokens: inputTokens,
-            completion_tokens: outputTokens,
-            total_tokens: inputTokens + outputTokens,
-          };
-
-          // Try to parse tool calls from the buffered response
-          const parsed = parseToolCallsFromText(resultText);
-          if (parsed && parsed.toolCalls.length > 0) {
-            const roleChunk: OpenAIStreamChunk = {
-              id: requestId,
-              object: "chat.completion.chunk",
-              created: nowUnix(),
-              model,
-              choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
-            };
-            enqueue(`data: ${JSON.stringify(roleChunk)}\n\n`);
-
-            if (thinkingText) {
-              const thinkChunk: OpenAIStreamChunk = {
-                id: requestId,
-                object: "chat.completion.chunk",
-                created: nowUnix(),
-                model,
-                choices: [{ index: 0, delta: { reasoning_content: thinkingText }, finish_reason: null }],
-              };
-              enqueue(`data: ${JSON.stringify(thinkChunk)}\n\n`);
-            }
-
-            if (parsed.textContent) {
-              const textChunk: OpenAIStreamChunk = {
-                id: requestId,
-                object: "chat.completion.chunk",
-                created: nowUnix(),
-                model,
-                choices: [{ index: 0, delta: { content: parsed.textContent }, finish_reason: null }],
-              };
-              enqueue(`data: ${JSON.stringify(textChunk)}\n\n`);
-            }
-
-            for (let i = 0; i < parsed.toolCalls.length; i++) {
-              const tc = parsed.toolCalls[i]!;
-              const toolChunk: OpenAIStreamChunk = {
-                id: requestId,
-                object: "chat.completion.chunk",
-                created: nowUnix(),
-                model,
-                choices: [{
-                  index: 0,
-                  delta: {
-                    tool_calls: [{
-                      index: i,
-                      id: tc.id,
-                      type: "function",
-                      function: { name: tc.function.name, arguments: tc.function.arguments },
-                    }],
-                  },
-                  finish_reason: null,
-                }],
-              };
-              enqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
-            }
-
-            const finishChunk: OpenAIStreamChunk = {
-              id: requestId,
-              object: "chat.completion.chunk",
-              created: nowUnix(),
-              model,
-              choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
-              ...(includeUsage ? { usage } : {}),
-            };
-            enqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
-          } else {
-            const roleChunk: OpenAIStreamChunk = {
-              id: requestId,
-              object: "chat.completion.chunk",
-              created: nowUnix(),
-              model,
-              choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
-            };
-            enqueue(`data: ${JSON.stringify(roleChunk)}\n\n`);
-
-            if (thinkingText) {
-              const thinkChunk: OpenAIStreamChunk = {
-                id: requestId,
-                object: "chat.completion.chunk",
-                created: nowUnix(),
-                model,
-                choices: [{ index: 0, delta: { reasoning_content: thinkingText }, finish_reason: null }],
-              };
-              enqueue(`data: ${JSON.stringify(thinkChunk)}\n\n`);
-            }
-
-            if (resultText) {
-              const textChunk: OpenAIStreamChunk = {
-                id: requestId,
-                object: "chat.completion.chunk",
-                created: nowUnix(),
-                model,
-                choices: [{ index: 0, delta: { content: resultText }, finish_reason: null }],
-              };
-              enqueue(`data: ${JSON.stringify(textChunk)}\n\n`);
-            }
-
-            const finishChunk: OpenAIStreamChunk = {
-              id: requestId,
-              object: "chat.completion.chunk",
-              created: nowUnix(),
-              model,
-              choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-              ...(includeUsage ? { usage } : {}),
-            };
-            enqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
-          }
-
-          enqueue("data: [DONE]\n\n");
-          close();
-        } catch (err) {
-          if (!cancelled) {
-            console.error("[STREAM-TOOLS] error during streaming:", err);
-            try { controller.error(err); } catch { /* already closed */ }
-          }
-        }
-      },
-      cancel() {
-        cancelled = true;
       },
     });
   }
