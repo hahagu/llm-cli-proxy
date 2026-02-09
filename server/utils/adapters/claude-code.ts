@@ -359,7 +359,7 @@ function convertMessages(request: OpenAIChatRequest): {
   };
 }
 
-function makeEnv(oauthToken: string, thinkingBudget?: number): Record<string, string> {
+function makeEnv(oauthToken: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value !== undefined) {
@@ -370,10 +370,6 @@ function makeEnv(oauthToken: string, thinkingBudget?: number): Record<string, st
   env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
   // Prevent the SDK from using any ambient API key
   delete (env as Record<string, string | undefined>).ANTHROPIC_API_KEY;
-  // Set thinking budget via env var (CLI checks this before the CLI flag)
-  if (thinkingBudget !== undefined) {
-    env.MAX_THINKING_TOKENS = String(thinkingBudget);
-  }
   return env;
 }
 
@@ -426,31 +422,51 @@ function resolveThinkingBudget(request: OpenAIChatRequest): number | undefined {
   return undefined;
 }
 
+/** Prompt suffix that instructs the model to think out loud in tags. */
+const THINKING_PROMPT =
+  "\n\nIMPORTANT: Before answering, you MUST think through your reasoning step-by-step " +
+  "inside <thinking>...</thinking> XML tags. Place ALL of your internal reasoning, analysis, " +
+  "and thought process inside these tags. Then provide your final answer AFTER the closing " +
+  "</thinking> tag. The thinking section will be shown separately to the user as your " +
+  "reasoning process. Always include the thinking tags, even for simple questions.";
+
+/** Extract thinking content from text that uses <thinking>...</thinking> tags. */
+function extractThinkingFromText(text: string): {
+  thinking: string;
+  content: string;
+} {
+  const match = text.match(/^[\s]*<thinking>([\s\S]*?)<\/thinking>([\s\S]*)$/);
+  if (!match) {
+    return { thinking: "", content: text };
+  }
+  return {
+    thinking: match[1]!.trim(),
+    content: match[2]!.trim(),
+  };
+}
+
 function buildSdkOptions(
   request: OpenAIChatRequest,
   systemPrompt: string | undefined,
   promptSuffix: string,
   oauthToken: string,
   streaming: boolean,
+  wantsThinking: boolean,
 ) {
-  const thinkingBudget = resolveThinkingBudget(request);
   const options: Record<string, unknown> = {
     model: request.model,
     maxTurns: 1,
     allowedTools: [],
     settingSources: [],
-    env: makeEnv(oauthToken, thinkingBudget),
+    env: makeEnv(oauthToken),
   };
-
-  if (thinkingBudget) {
-    options.maxThinkingTokens = thinkingBudget;
-  }
 
   // The SDK always prepends "You are Claude Code…" before our prompt.
   // We neutralize that identity first, then append the caller's prompt
   // (or a plain default) so it takes full precedence.
   const base = systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
-  options.systemPrompt = SYSTEM_PROMPT_NEUTRALIZER + base + promptSuffix;
+  const thinkingSuffix = wantsThinking ? THINKING_PROMPT : "";
+  options.systemPrompt = SYSTEM_PROMPT_NEUTRALIZER + base + promptSuffix + thinkingSuffix;
 
   if (streaming) {
     options.includePartialMessages = true;
@@ -482,24 +498,18 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     const requestId = generateId();
 
     let resultText = "";
-    let thinkingText = "";
     let inputTokens = 0;
     let outputTokens = 0;
-
-    const sdkOptions = buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, false);
-    console.log("[THINKING-DEBUG] complete() thinkingBudget:", sdkOptions.maxThinkingTokens, "env MAX_THINKING_TOKENS:", (sdkOptions.env as Record<string, string>)?.MAX_THINKING_TOKENS);
+    const wantsThinking = resolveThinkingBudget(request) !== undefined;
 
     for await (const message of query({
       prompt: prompt as string,
-      options: sdkOptions,
+      options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, false, wantsThinking),
     })) {
-      console.log("[THINKING-DEBUG] complete() message.type:", message.type, message.type === "assistant" ? "blocks:" + JSON.stringify((message.message?.content ?? []).map((b: Record<string, unknown>) => b.type)) : "");
       if (message.type === "assistant") {
         for (const block of message.message.content) {
           if (block.type === "text") {
             resultText += block.text;
-          } else if (block.type === "thinking") {
-            thinkingText += (block as { thinking?: string }).thinking ?? "";
           } else if (block.type === "image") {
             const source = (block as Record<string, unknown>).source as
               | { type: string; media_type?: string; data?: string }
@@ -525,9 +535,14 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
       }
     }
 
+    // Extract thinking from text if thinking was requested
+    const { thinking: thinkingText, content: cleanedText } = wantsThinking
+      ? extractThinkingFromText(resultText)
+      : { thinking: "", content: resultText };
+
     // Parse tool calls from model response if tools were provided
-    if (hasTools && resultText) {
-      const parsed = parseToolCallsFromText(resultText);
+    if (hasTools && cleanedText) {
+      const parsed = parseToolCallsFromText(cleanedText);
       if (parsed && parsed.toolCalls.length > 0) {
         return {
           id: requestId,
@@ -565,7 +580,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           index: 0,
           message: {
             role: "assistant",
-            content: resultText || null,
+            content: cleanedText || null,
             ...(thinkingText ? { reasoning_content: thinkingText } : {}),
           },
           finish_reason: "stop",
@@ -600,25 +615,28 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     const model = request.model;
     const includeUsage = !!request.stream_options?.include_usage;
 
+    const wantsThinking = resolveThinkingBudget(request) !== undefined;
+
     const sdkQuery = query({
       prompt: prompt as string,
-      options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, true),
+      options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, true, wantsThinking),
     });
+
+    // When thinking is requested, we buffer text until </thinking> is found,
+    // then emit thinking as reasoning_content and the rest as content.
+    // This is needed because the model outputs thinking inline as text.
+    if (wantsThinking || hasTools) {
+      return this._streamBuffered(sdkQuery, requestId, model, includeUsage, hasTools, wantsThinking);
+    }
 
     return new ReadableStream<string>({
       async start(controller) {
         try {
           let sentRole = false;
-          let bufferedText = "";
 
           for await (const message of sdkQuery) {
             if (message.type === "stream_event") {
               const event = message.event as Record<string, unknown>;
-              // Debug: log all stream event types and delta types
-              if (event.type === "content_block_start" || event.type === "content_block_delta") {
-                const delta = (event.delta ?? event.content_block) as Record<string, unknown> | undefined;
-                console.log("[THINKING-DEBUG] stream event:", event.type, "delta/block type:", delta?.type);
-              }
 
               if (event.type === "message_start" && !sentRole) {
                 sentRole = true;
@@ -640,23 +658,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
               if (event.type === "content_block_delta") {
                 const delta = event.delta as Record<string, unknown>;
-                if (delta?.type === "thinking_delta" && delta.thinking) {
-                  const chunk: OpenAIStreamChunk = {
-                    id: requestId,
-                    object: "chat.completion.chunk",
-                    created: nowUnix(),
-                    model,
-                    choices: [
-                      {
-                        index: 0,
-                        delta: { reasoning_content: delta.thinking as string },
-                        finish_reason: null,
-                      },
-                    ],
-                  };
-                  controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
-                } else if (delta?.type === "text_delta" && delta.text) {
-                  if (hasTools) bufferedText += delta.text as string;
+                if (delta?.type === "text_delta" && delta.text) {
                   const chunk: OpenAIStreamChunk = {
                     id: requestId,
                     object: "chat.completion.chunk",
@@ -676,42 +678,9 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
               if (event.type === "message_delta") {
                 const delta = event.delta as Record<string, unknown>;
-                let stopReason = translateStopReason(
+                const stopReason = translateStopReason(
                   delta?.stop_reason as string | null,
                 );
-
-                // If tools were requested, try to parse tool calls from buffered text
-                let parsedTools: ReturnType<typeof parseToolCallsFromText> = null;
-                if (hasTools && bufferedText) {
-                  parsedTools = parseToolCallsFromText(bufferedText);
-                  if (parsedTools && parsedTools.toolCalls.length > 0) {
-                    // Emit tool call chunks before the finish chunk
-                    for (let i = 0; i < parsedTools.toolCalls.length; i++) {
-                      const tc = parsedTools.toolCalls[i]!;
-                      const toolChunk: OpenAIStreamChunk = {
-                        id: requestId,
-                        object: "chat.completion.chunk",
-                        created: nowUnix(),
-                        model,
-                        choices: [{
-                          index: 0,
-                          delta: {
-                            tool_calls: [{
-                              index: i,
-                              id: tc.id,
-                              type: "function",
-                              function: { name: tc.function.name, arguments: tc.function.arguments },
-                            }],
-                          },
-                          finish_reason: null,
-                        }],
-                      };
-                      controller.enqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
-                    }
-                    stopReason = "tool_calls";
-                  }
-                }
-
                 const chunk: OpenAIStreamChunk = {
                   id: requestId,
                   object: "chat.completion.chunk",
@@ -756,6 +725,194 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           console.error("[STREAM] error during streaming:", err);
           controller.error(err);
         }
+      },
+    });
+  }
+
+  /**
+   * Buffered streaming: collect the full response, then emit chunks.
+   * Used when we need to post-process text (thinking tag extraction, tool parsing).
+   */
+  private _streamBuffered(
+    sdkQuery: AsyncIterable<Record<string, unknown>>,
+    requestId: string,
+    model: string,
+    includeUsage: boolean,
+    hasTools: boolean,
+    wantsThinking: boolean,
+  ): ReadableStream<string> {
+    let cancelled = false;
+    return new ReadableStream<string>({
+      async start(controller) {
+        const enqueue = (data: string) => {
+          if (cancelled) return;
+          try { controller.enqueue(data); } catch { cancelled = true; }
+        };
+        const close = () => {
+          if (cancelled) return;
+          try { controller.close(); } catch { cancelled = true; }
+        };
+
+        try {
+          let resultText = "";
+          let inputTokens = 0;
+          let outputTokens = 0;
+
+          const keepalive = setInterval(() => enqueue(": keepalive\n\n"), 5000);
+
+          try {
+            for await (const message of sdkQuery) {
+              if (cancelled) break;
+              const msg = message as { type: string; subtype?: string; message?: { content: Array<{ type: string; text?: string }> }; usage?: { input_tokens: number; output_tokens: number }; errors?: string[] };
+
+              if (msg.type === "assistant") {
+                for (const block of msg.message?.content ?? []) {
+                  if (block.type === "text" && block.text) {
+                    resultText += block.text;
+                  } else if (block.type === "image") {
+                    const source = (block as Record<string, unknown>).source as
+                      | { type: string; media_type?: string; data?: string }
+                      | undefined;
+                    if (source?.type === "base64" && source.data) {
+                      const mimeType = source.media_type ?? "image/png";
+                      resultText += `![image](data:${mimeType};base64,${source.data})`;
+                    }
+                  }
+                }
+              }
+
+              if (msg.type === "result") {
+                if (msg.subtype === "success") {
+                  inputTokens = msg.usage?.input_tokens ?? 0;
+                  outputTokens = msg.usage?.output_tokens ?? 0;
+                } else {
+                  throw providerError(
+                    `Claude Code error: ${msg.errors?.join("; ") || msg.subtype}`,
+                  );
+                }
+              }
+            }
+          } finally {
+            clearInterval(keepalive);
+          }
+
+          if (cancelled) return;
+
+          // Extract thinking from text if requested
+          const { thinking: thinkingText, content: cleanedText } = wantsThinking
+            ? extractThinkingFromText(resultText)
+            : { thinking: "", content: resultText };
+
+          const usage = {
+            prompt_tokens: inputTokens,
+            completion_tokens: outputTokens,
+            total_tokens: inputTokens + outputTokens,
+          };
+
+          // Emit role chunk
+          const roleChunk: OpenAIStreamChunk = {
+            id: requestId,
+            object: "chat.completion.chunk",
+            created: nowUnix(),
+            model,
+            choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
+          };
+          enqueue(`data: ${JSON.stringify(roleChunk)}\n\n`);
+
+          // Emit thinking as reasoning_content
+          if (thinkingText) {
+            const thinkChunk: OpenAIStreamChunk = {
+              id: requestId,
+              object: "chat.completion.chunk",
+              created: nowUnix(),
+              model,
+              choices: [{ index: 0, delta: { reasoning_content: thinkingText }, finish_reason: null }],
+            };
+            enqueue(`data: ${JSON.stringify(thinkChunk)}\n\n`);
+          }
+
+          // Try to parse tool calls
+          const textForToolParsing = hasTools ? cleanedText : "";
+          const parsed = textForToolParsing ? parseToolCallsFromText(textForToolParsing) : null;
+
+          if (parsed && parsed.toolCalls.length > 0) {
+            if (parsed.textContent) {
+              const textChunk: OpenAIStreamChunk = {
+                id: requestId,
+                object: "chat.completion.chunk",
+                created: nowUnix(),
+                model,
+                choices: [{ index: 0, delta: { content: parsed.textContent }, finish_reason: null }],
+              };
+              enqueue(`data: ${JSON.stringify(textChunk)}\n\n`);
+            }
+
+            for (let i = 0; i < parsed.toolCalls.length; i++) {
+              const tc = parsed.toolCalls[i]!;
+              const toolChunk: OpenAIStreamChunk = {
+                id: requestId,
+                object: "chat.completion.chunk",
+                created: nowUnix(),
+                model,
+                choices: [{
+                  index: 0,
+                  delta: {
+                    tool_calls: [{
+                      index: i,
+                      id: tc.id,
+                      type: "function",
+                      function: { name: tc.function.name, arguments: tc.function.arguments },
+                    }],
+                  },
+                  finish_reason: null,
+                }],
+              };
+              enqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
+            }
+
+            const finishChunk: OpenAIStreamChunk = {
+              id: requestId,
+              object: "chat.completion.chunk",
+              created: nowUnix(),
+              model,
+              choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+              ...(includeUsage ? { usage } : {}),
+            };
+            enqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
+          } else {
+            if (cleanedText) {
+              const textChunk: OpenAIStreamChunk = {
+                id: requestId,
+                object: "chat.completion.chunk",
+                created: nowUnix(),
+                model,
+                choices: [{ index: 0, delta: { content: cleanedText }, finish_reason: null }],
+              };
+              enqueue(`data: ${JSON.stringify(textChunk)}\n\n`);
+            }
+
+            const finishChunk: OpenAIStreamChunk = {
+              id: requestId,
+              object: "chat.completion.chunk",
+              created: nowUnix(),
+              model,
+              choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+              ...(includeUsage ? { usage } : {}),
+            };
+            enqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
+          }
+
+          enqueue("data: [DONE]\n\n");
+          close();
+        } catch (err) {
+          if (!cancelled) {
+            console.error("[STREAM-BUFFERED] error during streaming:", err);
+            try { controller.error(err); } catch { /* already closed */ }
+          }
+        }
+      },
+      cancel() {
+        cancelled = true;
       },
     });
   }
