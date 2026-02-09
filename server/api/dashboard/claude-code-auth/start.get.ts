@@ -16,6 +16,9 @@ export default defineEventHandler(async (event) => {
     .digest("base64url");
 
   const state = randomBytes(16).toString("hex");
+  const clientId = getClientId();
+  const port = 55000 + Math.floor(Math.random() * 10000);
+  const redirectUri = `http://localhost:${port}`;
 
   // Store PKCE data in httpOnly cookie (10 min TTL)
   setCookie(event, "claude_oauth_pkce", JSON.stringify({
@@ -30,10 +33,6 @@ export default defineEventHandler(async (event) => {
     path: "/",
     sameSite: "lax",
   });
-
-  const clientId = getClientId();
-  const port = 55000 + Math.floor(Math.random() * 10000);
-  const redirectUri = `http://localhost:${port}`;
 
   const params = new URLSearchParams({
     response_type: "code",
