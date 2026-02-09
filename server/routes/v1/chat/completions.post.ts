@@ -30,18 +30,8 @@ export default defineEventHandler(async (event) => {
     };
   }
 
-  // Debug logging — remove after troubleshooting
-  const headers = Object.fromEntries(
-    Object.entries(getHeaders(event)).filter(
-      ([k]) => !k.toLowerCase().startsWith("authorization") && k.toLowerCase() !== "x-api-key",
-    ),
-  );
-  console.log("[DEBUG /v1/chat/completions] headers:", JSON.stringify(headers, null, 2));
-  console.log("[DEBUG /v1/chat/completions] body:", JSON.stringify(rawBody, null, 2));
-
   const parsed = chatCompletionRequestSchema.safeParse(rawBody);
   if (!parsed.success) {
-    console.log("[DEBUG /v1/chat/completions] validation failed:", JSON.stringify(parsed.error.issues, null, 2));
     setResponseStatus(event, 400);
     return {
       error: {
@@ -75,6 +65,7 @@ export default defineEventHandler(async (event) => {
 
     return result.data;
   } catch (err) {
+    console.error("[DEBUG /v1/chat/completions] error:", err);
     if (err instanceof OpenAIError) {
       setResponseStatus(event, err.statusCode);
       return err.toResponse();
