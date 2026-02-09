@@ -16,10 +16,13 @@ export default defineEventHandler(async (event) => {
     };
   }
 
+  console.log("[COMPLETIONS] reading body...");
   let rawBody: unknown;
   try {
     rawBody = await readBody(event);
-  } catch {
+    console.log(`[COMPLETIONS] body read OK, size=${JSON.stringify(rawBody).length}`);
+  } catch (err) {
+    console.error("[COMPLETIONS] readBody failed:", err);
     setResponseStatus(event, 400);
     return {
       error: {
