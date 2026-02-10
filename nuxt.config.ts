@@ -51,6 +51,16 @@ export default defineNuxtConfig({
     // time without a meaningful benefit (no code is sent to end users).
     minify: false,
     sourceMap: false,
+    // Skip gzip/brotli pre-compression of public assets at build time.
+    // A reverse proxy or CDN can handle this at serving time instead.
+    compressPublicAssets: false,
+    rollupConfig: {
+      // Tree-shaking analyzes the entire dependency graph to remove unused
+      // exports. This is the most expensive Rollup operation and only reduces
+      // server bundle size — irrelevant for server-side code that doesn't
+      // need to minimize download size.
+      treeshake: false,
+    },
   },
 
   experimental: {
