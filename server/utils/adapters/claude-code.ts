@@ -307,9 +307,19 @@ async function buildMcpServer(tools: OpenAITool[]) {
   );
 
   const mcpTools = tools.map((t) => {
-    const shape = jsonSchemaToZodShape(
-      t.function.parameters as Record<string, unknown> | undefined,
-    );
+    const rawParams = t.function.parameters as Record<string, unknown> | undefined;
+    const shape = jsonSchemaToZodShape(rawParams);
+
+    if (process.env.DEBUG_SDK) {
+      const props = rawParams?.properties as Record<string, unknown> | undefined;
+      console.log("[MCP:tool]", JSON.stringify({
+        name: t.function.name,
+        schemaKeys: props ? Object.keys(props) : [],
+        shapeKeys: Object.keys(shape),
+        rawParams: rawParams,
+      }));
+    }
+
     return defineTool(
       t.function.name,
       t.function.description ?? "",
@@ -846,6 +856,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           // clients like LobeChat expect.
           const nativeToolCalls: Array<{ id: string; name: string }> = [];
           let currentToolUse: { id: string; name: string; index: number } | null = null;
+          let currentToolArgLen = 0; // accumulated argument bytes for debug logging
           // Count message_start events to detect second turn (after tool execution).
           // Once the model enters a second turn, suppress text output since the
           // tool handler returned a placeholder and the model's response is irrelevant.
@@ -1036,6 +1047,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                   const toolName = stripMcpPrefix((block.name as string) ?? "");
                   const toolIndex = nativeToolCalls.length;
                   currentToolUse = { id: callId, name: toolName, index: toolIndex };
+                  currentToolArgLen = 0;
 
                   // Emit initial tool_call chunk (id + name + empty arguments)
                   const initChunk: OpenAIStreamChunk = {
@@ -1071,6 +1083,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                   // Stream argument fragment to client
                   const fragment = (delta.partial_json as string) ?? "";
                   if (fragment) {
+                    currentToolArgLen += fragment.length;
                     const argChunk: OpenAIStreamChunk = {
                       id: requestId,
                       object: "chat.completion.chunk",
@@ -1101,6 +1114,10 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                     id: currentToolUse.id,
                     name: currentToolUse.name,
                   });
+                  if (process.env.DEBUG_SDK) {
+                    console.log("[SDK:tool_use:args]", JSON.stringify({ id: currentToolUse.id, name: currentToolUse.name, argLen: currentToolArgLen }));
+                  }
+                  currentToolArgLen = 0;
                   if (process.env.DEBUG_SDK) {
                     console.log("[SDK:tool_use:captured]", JSON.stringify({ id: currentToolUse.id, name: currentToolUse.name, index: currentToolUse.index }));
                   }
