@@ -484,15 +484,11 @@ function buildSdkOptions(
   const options: Record<string, unknown> = {
     model: request.model,
     maxTurns: 30,
-    // Disallow every built-in tool so the model can't invoke them.
-    // Client-provided tools are handled via prompt injection instead.
-    // (Using `disallowedTools` rather than `tools:[]` because the SDK
-    // translates the latter to `--tools ""` which can hang the subprocess.)
-    disallowedTools: [
-      "Read", "Write", "Edit", "Bash", "Glob", "Grep",
-      "WebSearch", "WebFetch", "Task", "NotebookEdit", "TodoWrite",
-      "AskUserQuestion",
-    ],
+    // `tools: []` disables ALL built-in Claude Code tools (Read, Write, Bash,
+    // WebSearch, etc.) so the model can't invoke them.  Client-provided tools
+    // are handled via prompt injection (promptSuffix) instead.
+    // `allowedTools: []` separately means no tools are auto-approved.
+    tools: [],
     allowedTools: [],
     settingSources: [],
     env: makeEnv(oauthToken),
