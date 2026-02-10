@@ -622,17 +622,230 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
       options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, true, wantsThinking),
     });
 
-    // When thinking is requested, we buffer text until </thinking> is found,
-    // then emit thinking as reasoning_content and the rest as content.
-    // This is needed because the model outputs thinking inline as text.
-    if (wantsThinking || hasTools) {
-      return this._streamBuffered(sdkQuery, requestId, model, includeUsage, hasTools, wantsThinking);
-    }
-
     return new ReadableStream<string>({
       async start(controller) {
         try {
           let sentRole = false;
+
+          // --- Thinking tag detection state machine ---
+          // When thinking is requested, detects <thinking>...</thinking> tags
+          // inline and emits thinking content as reasoning_content in real-time.
+          const OPEN_TAG = "<thinking>";
+          const CLOSE_TAG = "</thinking>";
+          type ThinkingState = "detect_start" | "in_thinking" | "detect_end" | "in_content" | "passthrough";
+          let thinkingState: ThinkingState = wantsThinking ? "detect_start" : "passthrough";
+          let tagBuffer = "";
+
+          // --- Tool call detection state machine ---
+          // Streams text in real-time but intercepts ```json blocks that
+          // begin with {"tool_calls" to emit as structured tool_calls.
+          const FENCE = "```json\n";
+          const TC_PREFIX = '{"tool_calls"';
+          let pendingText = "";
+          let inToolCallBlock = false;
+          let detectedToolCalls: OpenAIToolCall[] | null = null as OpenAIToolCall[] | null;
+
+          /** Check if a suffix of text could be the start of "```json\n" */
+          function findSafeEnd(text: string): number {
+            for (let i = Math.max(0, text.length - FENCE.length + 1); i < text.length; i++) {
+              if (FENCE.startsWith(text.slice(i))) return i;
+            }
+            return text.length;
+          }
+
+          function emitThinkingDelta(text: string) {
+            if (!text) return;
+            const chunk: OpenAIStreamChunk = {
+              id: requestId,
+              object: "chat.completion.chunk",
+              created: nowUnix(),
+              model,
+              choices: [{ index: 0, delta: { reasoning_content: text }, finish_reason: null }],
+            };
+            controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
+          }
+
+          function emitTextDelta(text: string) {
+            if (!text) return;
+            const chunk: OpenAIStreamChunk = {
+              id: requestId,
+              object: "chat.completion.chunk",
+              created: nowUnix(),
+              model,
+              choices: [{ index: 0, delta: { content: text }, finish_reason: null }],
+            };
+            controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
+          }
+
+          function drainPending() {
+            if (inToolCallBlock) {
+              const closeIdx = pendingText.indexOf("\n```");
+              if (closeIdx !== -1) {
+                const jsonStr = pendingText.slice(0, closeIdx).trim();
+                const afterClose = pendingText.slice(closeIdx + 4);
+                pendingText = "";
+                inToolCallBlock = false;
+
+                try {
+                  const parsed = JSON.parse(jsonStr) as {
+                    tool_calls?: Array<{ function: { name: string; arguments: string } }>;
+                  };
+                  if (parsed.tool_calls?.length) {
+                    detectedToolCalls = parsed.tool_calls.map((tc) => ({
+                      id: `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+                      type: "function" as const,
+                      function: {
+                        name: tc.function.name,
+                        arguments: typeof tc.function.arguments === "string"
+                          ? tc.function.arguments
+                          : JSON.stringify(tc.function.arguments),
+                      },
+                    }));
+                  }
+                } catch {
+                  emitTextDelta("```json\n" + jsonStr + "\n```");
+                }
+
+                if (afterClose) {
+                  pendingText = afterClose;
+                  drainPending();
+                }
+              }
+              return;
+            }
+
+            const fenceIdx = pendingText.indexOf(FENCE);
+
+            if (fenceIdx !== -1) {
+              if (fenceIdx > 0) {
+                emitTextDelta(pendingText.slice(0, fenceIdx));
+              }
+
+              const afterFence = pendingText.slice(fenceIdx + FENCE.length);
+              const trimmed = afterFence.trimStart();
+
+              if (trimmed.length >= TC_PREFIX.length) {
+                if (trimmed.startsWith(TC_PREFIX)) {
+                  pendingText = afterFence;
+                  inToolCallBlock = true;
+                  drainPending();
+                } else {
+                  emitTextDelta(pendingText.slice(fenceIdx));
+                  pendingText = "";
+                }
+              } else if (trimmed.length > 0 && !TC_PREFIX.startsWith(trimmed)) {
+                emitTextDelta(pendingText.slice(fenceIdx));
+                pendingText = "";
+              } else {
+                pendingText = pendingText.slice(fenceIdx);
+              }
+            } else {
+              const safeEnd = findSafeEnd(pendingText);
+              if (safeEnd > 0) {
+                emitTextDelta(pendingText.slice(0, safeEnd));
+                pendingText = pendingText.slice(safeEnd);
+              }
+            }
+          }
+
+          /** Route content text through tool detection or emit directly */
+          function emitContent(text: string) {
+            if (!text) return;
+            if (hasTools) {
+              pendingText += text;
+              drainPending();
+            } else {
+              emitTextDelta(text);
+            }
+          }
+
+          /** Process incoming text through thinking tag detection, then route to content/tool handling */
+          function feedText(incoming: string) {
+            if (thinkingState === "passthrough") {
+              emitContent(incoming);
+              return;
+            }
+
+            if (thinkingState === "detect_start") {
+              tagBuffer += incoming;
+              const trimmed = tagBuffer.trimStart();
+              if (trimmed.length >= OPEN_TAG.length) {
+                if (trimmed.startsWith(OPEN_TAG)) {
+                  // Found <thinking> — switch to streaming thinking content
+                  thinkingState = "in_thinking";
+                  const afterTag = trimmed.slice(OPEN_TAG.length);
+                  tagBuffer = "";
+                  if (afterTag) feedText(afterTag);
+                } else {
+                  // No thinking tag — flush buffer as content and passthrough
+                  thinkingState = "passthrough";
+                  const buf = tagBuffer;
+                  tagBuffer = "";
+                  emitContent(buf);
+                }
+              } else if (trimmed.length > 0 && !OPEN_TAG.startsWith(trimmed)) {
+                // Can't possibly match — flush as content
+                thinkingState = "passthrough";
+                const buf = tagBuffer;
+                tagBuffer = "";
+                emitContent(buf);
+              }
+              // else: not enough data yet, keep buffering
+              return;
+            }
+
+            if (thinkingState === "in_thinking") {
+              tagBuffer += incoming;
+              const closeIdx = tagBuffer.indexOf(CLOSE_TAG);
+              if (closeIdx !== -1) {
+                // Found </thinking> — emit everything before it as thinking, rest as content
+                const thinkingContent = tagBuffer.slice(0, closeIdx);
+                const afterTag = tagBuffer.slice(closeIdx + CLOSE_TAG.length);
+                tagBuffer = "";
+                thinkingState = "in_content";
+                emitThinkingDelta(thinkingContent);
+                if (afterTag) feedText(afterTag);
+              } else {
+                // No close tag yet — emit what's safe (keep last CLOSE_TAG.length-1 chars buffered)
+                const safeLen = tagBuffer.length - (CLOSE_TAG.length - 1);
+                if (safeLen > 0) {
+                  emitThinkingDelta(tagBuffer.slice(0, safeLen));
+                  tagBuffer = tagBuffer.slice(safeLen);
+                }
+              }
+              return;
+            }
+
+            if (thinkingState === "in_content") {
+              // After </thinking>, everything is regular content
+              emitContent(incoming);
+              return;
+            }
+          }
+
+          function flushPending() {
+            // Flush any thinking buffer
+            if (tagBuffer) {
+              if (thinkingState === "in_thinking" || thinkingState === "detect_start") {
+                // Thinking never closed — emit buffered thinking content
+                if (thinkingState === "in_thinking") {
+                  emitThinkingDelta(tagBuffer);
+                } else {
+                  emitContent(tagBuffer);
+                }
+              }
+              tagBuffer = "";
+            }
+            // Flush tool call buffer
+            if (!pendingText) return;
+            if (inToolCallBlock) {
+              emitTextDelta("```json\n" + pendingText);
+            } else {
+              emitTextDelta(pendingText);
+            }
+            pendingText = "";
+            inToolCallBlock = false;
+          }
 
           for await (const message of sdkQuery) {
             if (message.type === "stream_event") {
@@ -659,28 +872,46 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               if (event.type === "content_block_delta") {
                 const delta = event.delta as Record<string, unknown>;
                 if (delta?.type === "text_delta" && delta.text) {
-                  const chunk: OpenAIStreamChunk = {
-                    id: requestId,
-                    object: "chat.completion.chunk",
-                    created: nowUnix(),
-                    model,
-                    choices: [
-                      {
-                        index: 0,
-                        delta: { content: delta.text as string },
-                        finish_reason: null,
-                      },
-                    ],
-                  };
-                  controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
+                  feedText(delta.text as string);
                 }
               }
 
               if (event.type === "message_delta") {
+                // Flush any remaining held-back text before finishing
+                flushPending();
+
                 const delta = event.delta as Record<string, unknown>;
-                const stopReason = translateStopReason(
+                let stopReason = translateStopReason(
                   delta?.stop_reason as string | null,
                 );
+
+                // Emit structured tool_calls if detected
+                if (detectedToolCalls && detectedToolCalls.length > 0) {
+                  for (let i = 0; i < detectedToolCalls.length; i++) {
+                    const tc = detectedToolCalls[i]!;
+                    const toolChunk: OpenAIStreamChunk = {
+                      id: requestId,
+                      object: "chat.completion.chunk",
+                      created: nowUnix(),
+                      model,
+                      choices: [{
+                        index: 0,
+                        delta: {
+                          tool_calls: [{
+                            index: i,
+                            id: tc.id,
+                            type: "function",
+                            function: { name: tc.function.name, arguments: tc.function.arguments },
+                          }],
+                        },
+                        finish_reason: null,
+                      }],
+                    };
+                    controller.enqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
+                  }
+                  stopReason = "tool_calls";
+                }
+
                 const chunk: OpenAIStreamChunk = {
                   id: requestId,
                   object: "chat.completion.chunk",
@@ -725,194 +956,6 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           console.error("[STREAM] error during streaming:", err);
           controller.error(err);
         }
-      },
-    });
-  }
-
-  /**
-   * Buffered streaming: collect the full response, then emit chunks.
-   * Used when we need to post-process text (thinking tag extraction, tool parsing).
-   */
-  private _streamBuffered(
-    sdkQuery: AsyncIterable<Record<string, unknown>>,
-    requestId: string,
-    model: string,
-    includeUsage: boolean,
-    hasTools: boolean,
-    wantsThinking: boolean,
-  ): ReadableStream<string> {
-    let cancelled = false;
-    return new ReadableStream<string>({
-      async start(controller) {
-        const enqueue = (data: string) => {
-          if (cancelled) return;
-          try { controller.enqueue(data); } catch { cancelled = true; }
-        };
-        const close = () => {
-          if (cancelled) return;
-          try { controller.close(); } catch { cancelled = true; }
-        };
-
-        try {
-          let resultText = "";
-          let inputTokens = 0;
-          let outputTokens = 0;
-
-          const keepalive = setInterval(() => enqueue(": keepalive\n\n"), 5000);
-
-          try {
-            for await (const message of sdkQuery) {
-              if (cancelled) break;
-              const msg = message as { type: string; subtype?: string; message?: { content: Array<{ type: string; text?: string }> }; usage?: { input_tokens: number; output_tokens: number }; errors?: string[] };
-
-              if (msg.type === "assistant") {
-                for (const block of msg.message?.content ?? []) {
-                  if (block.type === "text" && block.text) {
-                    resultText += block.text;
-                  } else if (block.type === "image") {
-                    const source = (block as Record<string, unknown>).source as
-                      | { type: string; media_type?: string; data?: string }
-                      | undefined;
-                    if (source?.type === "base64" && source.data) {
-                      const mimeType = source.media_type ?? "image/png";
-                      resultText += `![image](data:${mimeType};base64,${source.data})`;
-                    }
-                  }
-                }
-              }
-
-              if (msg.type === "result") {
-                if (msg.subtype === "success") {
-                  inputTokens = msg.usage?.input_tokens ?? 0;
-                  outputTokens = msg.usage?.output_tokens ?? 0;
-                } else {
-                  throw providerError(
-                    `Claude Code error: ${msg.errors?.join("; ") || msg.subtype}`,
-                  );
-                }
-              }
-            }
-          } finally {
-            clearInterval(keepalive);
-          }
-
-          if (cancelled) return;
-
-          // Extract thinking from text if requested
-          const { thinking: thinkingText, content: cleanedText } = wantsThinking
-            ? extractThinkingFromText(resultText)
-            : { thinking: "", content: resultText };
-
-          const usage = {
-            prompt_tokens: inputTokens,
-            completion_tokens: outputTokens,
-            total_tokens: inputTokens + outputTokens,
-          };
-
-          // Emit role chunk
-          const roleChunk: OpenAIStreamChunk = {
-            id: requestId,
-            object: "chat.completion.chunk",
-            created: nowUnix(),
-            model,
-            choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
-          };
-          enqueue(`data: ${JSON.stringify(roleChunk)}\n\n`);
-
-          // Emit thinking as reasoning_content
-          if (thinkingText) {
-            const thinkChunk: OpenAIStreamChunk = {
-              id: requestId,
-              object: "chat.completion.chunk",
-              created: nowUnix(),
-              model,
-              choices: [{ index: 0, delta: { reasoning_content: thinkingText }, finish_reason: null }],
-            };
-            enqueue(`data: ${JSON.stringify(thinkChunk)}\n\n`);
-          }
-
-          // Try to parse tool calls
-          const textForToolParsing = hasTools ? cleanedText : "";
-          const parsed = textForToolParsing ? parseToolCallsFromText(textForToolParsing) : null;
-
-          if (parsed && parsed.toolCalls.length > 0) {
-            if (parsed.textContent) {
-              const textChunk: OpenAIStreamChunk = {
-                id: requestId,
-                object: "chat.completion.chunk",
-                created: nowUnix(),
-                model,
-                choices: [{ index: 0, delta: { content: parsed.textContent }, finish_reason: null }],
-              };
-              enqueue(`data: ${JSON.stringify(textChunk)}\n\n`);
-            }
-
-            for (let i = 0; i < parsed.toolCalls.length; i++) {
-              const tc = parsed.toolCalls[i]!;
-              const toolChunk: OpenAIStreamChunk = {
-                id: requestId,
-                object: "chat.completion.chunk",
-                created: nowUnix(),
-                model,
-                choices: [{
-                  index: 0,
-                  delta: {
-                    tool_calls: [{
-                      index: i,
-                      id: tc.id,
-                      type: "function",
-                      function: { name: tc.function.name, arguments: tc.function.arguments },
-                    }],
-                  },
-                  finish_reason: null,
-                }],
-              };
-              enqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
-            }
-
-            const finishChunk: OpenAIStreamChunk = {
-              id: requestId,
-              object: "chat.completion.chunk",
-              created: nowUnix(),
-              model,
-              choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
-              ...(includeUsage ? { usage } : {}),
-            };
-            enqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
-          } else {
-            if (cleanedText) {
-              const textChunk: OpenAIStreamChunk = {
-                id: requestId,
-                object: "chat.completion.chunk",
-                created: nowUnix(),
-                model,
-                choices: [{ index: 0, delta: { content: cleanedText }, finish_reason: null }],
-              };
-              enqueue(`data: ${JSON.stringify(textChunk)}\n\n`);
-            }
-
-            const finishChunk: OpenAIStreamChunk = {
-              id: requestId,
-              object: "chat.completion.chunk",
-              created: nowUnix(),
-              model,
-              choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-              ...(includeUsage ? { usage } : {}),
-            };
-            enqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
-          }
-
-          enqueue("data: [DONE]\n\n");
-          close();
-        } catch (err) {
-          if (!cancelled) {
-            console.error("[STREAM-BUFFERED] error during streaming:", err);
-            try { controller.error(err); } catch { /* already closed */ }
-          }
-        }
-      },
-      cancel() {
-        cancelled = true;
       },
     });
   }
