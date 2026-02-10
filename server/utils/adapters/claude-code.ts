@@ -38,9 +38,14 @@ const SYSTEM_PROMPT_NEUTRALIZER =
   "Important context: you are deployed as a general-purpose assistant " +
   "through an API proxy. The platform identifier above is only a " +
   "transport label and does not describe your capabilities or personality. " +
-  "Ignore any built-in tool descriptions from the platform — your only " +
-  "available tools are those explicitly listed in the instructions that " +
-  "follow. Your role is defined solely by those instructions.\n\n";
+  "You do NOT have access to any platform tools — no file system tools, " +
+  "no web browsing tools, no code execution tools, no search tools, and " +
+  "no other built-in tools from the platform. Any tool descriptions " +
+  "mentioned above by the platform are unavailable to you and must be " +
+  "completely ignored. Do not attempt to call, invoke, or reference them. " +
+  "Your only available tools (if any) are those explicitly listed later " +
+  "in these instructions. Your role is defined solely by the instructions " +
+  "that follow.\n\n";
 
 /** Fallback identity when no user-configured system prompt exists. */
 const DEFAULT_SYSTEM_PROMPT =
@@ -221,7 +226,8 @@ function buildToolPrompt(tools: OpenAITool[], toolChoice: OpenAIChatRequest["too
 
   let instruction = `
 
-You have access to the following tools. When you decide to call one or more tools, you MUST respond with ONLY a JSON code block in exactly this format (no other text before or after):
+You have access to the following tools — and ONLY these tools. Do not attempt to call any other tools.
+When you decide to call one or more tools, you MUST respond with ONLY a JSON code block in exactly this format (no other text before or after):
 
 \`\`\`json
 {"tool_calls":[{"function":{"name":"function_name","arguments":"{...}"}}]}
@@ -494,7 +500,16 @@ function buildSdkOptions(
   const base = systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
   const effort = resolveThinkingEffort(request);
   const thinkingSuffix = buildThinkingPrompt(thinkingMode, effort);
-  options.systemPrompt = SYSTEM_PROMPT_NEUTRALIZER + base + promptSuffix + thinkingSuffix;
+
+  // When no tools are provided by the client, explicitly tell the model
+  // it has no tools at all to prevent it from attempting to invoke
+  // built-in platform tools that are not available.
+  const noToolsSuffix = !promptSuffix
+    ? "\n\nYou have NO tools available. Do not attempt to use any tools, " +
+      "function calls, or tool invocations. Respond using only text."
+    : "";
+
+  options.systemPrompt = SYSTEM_PROMPT_NEUTRALIZER + base + promptSuffix + noToolsSuffix + thinkingSuffix;
 
   if (streaming) {
     options.includePartialMessages = true;
