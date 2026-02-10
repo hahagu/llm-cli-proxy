@@ -475,8 +475,9 @@ function extractThinkingFromText(text: string): {
   };
 }
 
-// This proxy exposes the Claude model as a plain LLM — no agent tools.
-// Client-provided tools are handled via prompt injection (promptSuffix).
+// This proxy exposes the Claude model as a plain LLM — no native agent tools.
+// `tools: []` disables all built-in SDK tools; client-provided tools are
+// handled via prompt injection (promptSuffix) and parsed from text output.
 
 function buildSdkOptions(
   request: OpenAIChatRequest,
@@ -489,7 +490,14 @@ function buildSdkOptions(
   const options: Record<string, unknown> = {
     model: request.model,
     maxTurns: 30,
+    // `tools: []` disables ALL built-in Claude Code tools (Read, Write, Bash,
+    // WebSearch, etc.) so the model can't invoke them.  Client-provided tools
+    // are handled via prompt injection (promptSuffix) instead.
+    // `allowedTools: []` separately means no tools are auto-approved.
+    tools: [],
     allowedTools: [],
+    permissionMode: "bypassPermissions",
+    allowDangerouslySkipPermissions: true,
     settingSources: [],
     env: makeEnv(oauthToken),
   };
