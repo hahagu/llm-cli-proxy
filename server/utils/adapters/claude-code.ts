@@ -11,6 +11,7 @@ import type {
 import { generateId, nowUnix } from "./types";
 import { randomUUID } from "crypto";
 import { mapProviderHttpError, providerError, invalidRequest } from "../errors";
+import { z } from "zod";
 
 /**
  * Claude Code adapter using the official Claude Agent SDK.
@@ -204,104 +205,101 @@ function createMultimodalPrompt(
   };
 }
 
-// --- Prompt-based tool calling ---
+// --- MCP-based tool calling ---
 
-/** Build a compact parameter signature like (query: string, limit?: number). */
-function buildCompactParams(params: Record<string, unknown> | undefined): string {
-  if (!params) return "()";
-  const props = params.properties as Record<string, { type?: string }> | undefined;
-  if (!props) return "()";
-  const required = new Set((params.required as string[]) ?? []);
-  const parts: string[] = [];
-  for (const [name, schema] of Object.entries(props)) {
-    const type = schema.type ?? "any";
-    parts.push(required.has(name) ? `${name}: ${type}` : `${name}?: ${type}`);
-  }
-  return `(${parts.join(", ")})`;
+/** MCP server name used for proxied client tools. */
+const MCP_SERVER_NAME = "proxy";
+
+/** Prefix the SDK adds to MCP tool names: mcp__<server>__<tool> */
+function mcpToolName(toolName: string): string {
+  return `mcp__${MCP_SERVER_NAME}__${toolName}`;
 }
 
-/** Build a system prompt suffix describing available tools. */
-function buildToolPrompt(tools: OpenAITool[], toolChoice: OpenAIChatRequest["tool_choice"]): string {
-  if (toolChoice === "none" || !tools.length) return "";
-
-  const toolList = tools.map((t) => {
-    const params = buildCompactParams(t.function.parameters as Record<string, unknown> | undefined);
-    const desc = t.function.description ? ` — ${t.function.description}` : "";
-    return `- ${t.function.name}${params}${desc}`;
-  }).join("\n");
-
-  let instruction = `
-
-## TOOL CALLING PROTOCOL
-
-You have external tools. To use a tool, output a fenced JSON block in EXACTLY this format:
-
-\`\`\`json
-{"tool_calls":[{"function":{"name":"<tool_name>","arguments":"{\\"param\\":\\"value\\"}"}}]}
-\`\`\`
-
-Rules:
-- "arguments" must be a JSON-encoded STRING (with escaped quotes), not a raw object
-- You may include reasoning text before the JSON block
-- Do NOT just describe or narrate what you would do — actually call the tool using the format above
-- If a task requires using a tool, you MUST output the JSON block
-
-Example — calling a tool named "search" with a query parameter:
-
-\`\`\`json
-{"tool_calls":[{"function":{"name":"search","arguments":"{\\"query\\":\\"example\\"}"}}]}
-\`\`\`
-
-Available tools:
-${toolList}`;
-
-  if (toolChoice === "required") {
-    instruction += "\n\nYou MUST call at least one tool in your response.";
-  } else if (typeof toolChoice === "object" && toolChoice?.function?.name) {
-    instruction += `\n\nYou MUST call the tool "${toolChoice.function.name}" in your response.`;
-  }
-
-  return instruction;
+/** Strip MCP prefix from a tool name to recover the original OpenAI name. */
+function stripMcpPrefix(name: string): string {
+  const prefix = `mcp__${MCP_SERVER_NAME}__`;
+  return name.startsWith(prefix) ? name.slice(prefix.length) : name;
 }
 
-/** Try to parse tool calls from the model's text response. */
-function parseToolCallsFromText(text: string): {
-  toolCalls: OpenAIToolCall[];
-  textContent: string;
-} | null {
-  // Match a JSON code block containing tool_calls
-  const jsonBlockMatch = text.match(/```json\s*\n?([\s\S]*?)\n?\s*```/);
-  if (!jsonBlockMatch) return null;
-
-  try {
-    const parsed = JSON.parse(jsonBlockMatch[1]!) as {
-      tool_calls?: Array<{
-        function: { name: string; arguments: string };
-      }>;
-    };
-
-    if (!parsed.tool_calls?.length) return null;
-
-    const toolCalls: OpenAIToolCall[] = parsed.tool_calls.map((tc) => ({
-      id: `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
-      type: "function" as const,
-      function: {
-        name: tc.function.name,
-        arguments: typeof tc.function.arguments === "string"
-          ? tc.function.arguments
-          : JSON.stringify(tc.function.arguments),
-      },
-    }));
-
-    // Text content is everything outside the JSON block
-    const textContent = text
-      .replace(/```json\s*\n?[\s\S]*?\n?\s*```/, "")
-      .trim();
-
-    return { toolCalls, textContent };
-  } catch {
-    return null;
+/**
+ * Convert a JSON Schema type string to a basic Zod type.
+ * Only maps top-level properties — enough for the model to see
+ * parameter names and basic types.
+ */
+function jsonSchemaPropertyToZod(
+  prop: Record<string, unknown>,
+): z.ZodTypeAny {
+  const desc = prop.description as string | undefined;
+  let zodType: z.ZodTypeAny;
+  switch (prop.type) {
+    case "string":
+      zodType = desc ? z.string().describe(desc) : z.string();
+      break;
+    case "number":
+    case "integer":
+      zodType = desc ? z.number().describe(desc) : z.number();
+      break;
+    case "boolean":
+      zodType = desc ? z.boolean().describe(desc) : z.boolean();
+      break;
+    case "array":
+      zodType = desc ? z.array(z.any()).describe(desc) : z.array(z.any());
+      break;
+    case "object":
+      zodType = desc ? z.record(z.any()).describe(desc) : z.record(z.any());
+      break;
+    default:
+      zodType = desc ? z.any().describe(desc) : z.any();
   }
+  return zodType;
+}
+
+/**
+ * Convert an OpenAI function parameters JSON Schema to a Zod raw shape.
+ * Preserves property names, basic types, descriptions, and required flags.
+ */
+function jsonSchemaToZodShape(
+  schema: Record<string, unknown> | undefined,
+): Record<string, z.ZodTypeAny> {
+  if (!schema) return {};
+  const props = schema.properties as Record<string, Record<string, unknown>> | undefined;
+  if (!props) return {};
+  const required = new Set((schema.required as string[]) ?? []);
+  const shape: Record<string, z.ZodTypeAny> = {};
+  for (const [name, prop] of Object.entries(props)) {
+    const zodProp = jsonSchemaPropertyToZod(prop);
+    shape[name] = required.has(name) ? zodProp : zodProp.optional();
+  }
+  return shape;
+}
+
+/**
+ * Create an SDK MCP server that exposes the client's OpenAI tools as native
+ * MCP tools. The model calls these via native tool_use (not prompt-based).
+ * Handlers return a deferred marker — with maxTurns:1 the SDK stops before
+ * the model sees the result, and we capture the tool_use from the stream.
+ */
+async function buildMcpServer(tools: OpenAITool[]) {
+  const { createSdkMcpServer, tool: defineTool } = await import(
+    "@anthropic-ai/claude-agent-sdk"
+  );
+
+  const mcpTools = tools.map((t) => {
+    const shape = jsonSchemaToZodShape(
+      t.function.parameters as Record<string, unknown> | undefined,
+    );
+    return defineTool(
+      t.function.name,
+      t.function.description ?? "",
+      shape,
+      async () => ({ content: [{ type: "text" as const, text: "[DEFERRED]" }] }),
+    );
+  });
+
+  return createSdkMcpServer({
+    name: MCP_SERVER_NAME,
+    tools: mcpTools,
+  });
 }
 
 /** Validate unsupported parameters for Claude Code and return any prompt suffix. */
@@ -315,11 +313,6 @@ function validateAndEnhanceRequest(request: OpenAIChatRequest): {
 
   let promptSuffix = "";
   const hasTools = !!(request.tools && request.tools.length > 0);
-
-  // Prompt-based tool calling
-  if (hasTools) {
-    promptSuffix += buildToolPrompt(request.tools!, request.tool_choice);
-  }
 
   // JSON mode via prompt
   if (request.response_format?.type === "json_object") {
@@ -493,8 +486,9 @@ function extractThinkingFromText(text: string): {
 }
 
 // This proxy exposes the Claude model as a plain LLM — no native agent tools.
-// `tools: []` disables all built-in SDK tools; client-provided tools are
-// handled via prompt injection (promptSuffix) and parsed from text output.
+// Built-in SDK tools are disabled via `tools: []`.
+// Client-provided tools are registered as native MCP tools so the model
+// calls them via tool_use (not prompt-based JSON blocks).
 
 function buildSdkOptions(
   request: OpenAIChatRequest,
@@ -503,21 +497,31 @@ function buildSdkOptions(
   oauthToken: string,
   streaming: boolean,
   thinkingMode: ThinkingMode,
+  mcpServer?: Record<string, unknown>,
 ) {
   const options: Record<string, unknown> = {
     model: request.model,
-    // Single turn only — the proxy uses prompt-based tool calling where the
-    // client manages the tool loop via follow-up requests.  Multiple SDK
-    // turns would let the model invoke built-in tools autonomously, producing
-    // narration like "let me search…" without returning results to the client.
+    // Single turn only — the client manages the tool loop via follow-up
+    // requests.  With maxTurns:1 the model produces tool_use blocks but
+    // the SDK stops before executing them, so we can capture and forward.
     maxTurns: 1,
-    // `tools: []` attempts to disable built-in tools (may be a no-op in
-    // some SDK versions, but maxTurns:1 is the hard backstop).
+    // Disable all built-in SDK tools (Read, Write, Bash, etc.)
     tools: [],
-    allowedTools: [],
     settingSources: [],
     env: makeEnv(oauthToken),
   };
+
+  // Register client tools as MCP tools
+  if (mcpServer) {
+    options.mcpServers = { [MCP_SERVER_NAME]: mcpServer };
+    // Auto-approve all MCP tools so the model can call them without prompting
+    const mcpToolNames = (request.tools ?? []).map((t) =>
+      mcpToolName(t.function.name),
+    );
+    options.allowedTools = mcpToolNames;
+  } else {
+    options.allowedTools = [];
+  }
 
   // The SDK always prepends "You are Claude Code…" before our prompt.
   // We neutralize that identity first, then append the caller's prompt
@@ -557,20 +561,34 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
       : convertMessages(request);
     const requestId = generateId();
 
+    // Build MCP server for client tools (if any)
+    const mcpServer = hasTools ? await buildMcpServer(request.tools!) : undefined;
+
     let resultText = "";
     let inputTokens = 0;
     let outputTokens = 0;
     const thinkingMode = resolveThinkingMode(request);
     const wantsThinking = thinkingMode !== "off";
 
+    // Track native tool_use blocks from the model
+    const nativeToolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+
     for await (const message of query({
       prompt: prompt as string,
-      options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, false, thinkingMode),
+      options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, false, thinkingMode, mcpServer as Record<string, unknown> | undefined),
     })) {
       if (message.type === "assistant") {
         for (const block of message.message.content) {
           if (block.type === "text") {
             resultText += block.text;
+          } else if (block.type === "tool_use") {
+            // Native tool_use block — capture for OpenAI tool_calls
+            const tb = block as { id?: string; name?: string; input?: unknown };
+            nativeToolCalls.push({
+              id: tb.id ?? `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+              name: stripMcpPrefix(tb.name ?? ""),
+              arguments: typeof tb.input === "string" ? tb.input : JSON.stringify(tb.input ?? {}),
+            });
           } else if (block.type === "image") {
             const source = (block as Record<string, unknown>).source as
               | { type: string; media_type?: string; data?: string }
@@ -601,34 +619,36 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
       ? extractThinkingFromText(resultText)
       : { thinking: "", content: resultText };
 
-    // Parse tool calls from model response if tools were provided
-    if (hasTools && cleanedText) {
-      const parsed = parseToolCallsFromText(cleanedText);
-      if (parsed && parsed.toolCalls.length > 0) {
-        return {
-          id: requestId,
-          object: "chat.completion",
-          created: nowUnix(),
-          model: request.model,
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: "assistant",
-                content: parsed.textContent || null,
-                ...(thinkingText ? { reasoning_content: thinkingText } : {}),
-                tool_calls: parsed.toolCalls,
-              },
-              finish_reason: "tool_calls",
+    // Return native tool_use calls if found
+    if (nativeToolCalls.length > 0) {
+      const toolCalls: OpenAIToolCall[] = nativeToolCalls.map((tc) => ({
+        id: tc.id,
+        type: "function" as const,
+        function: { name: tc.name, arguments: tc.arguments },
+      }));
+      return {
+        id: requestId,
+        object: "chat.completion",
+        created: nowUnix(),
+        model: request.model,
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: cleanedText || null,
+              ...(thinkingText ? { reasoning_content: thinkingText } : {}),
+              tool_calls: toolCalls,
             },
-          ],
-          usage: {
-            prompt_tokens: inputTokens,
-            completion_tokens: outputTokens,
-            total_tokens: inputTokens + outputTokens,
+            finish_reason: "tool_calls",
           },
-        };
-      }
+        ],
+        usage: {
+          prompt_tokens: inputTokens,
+          completion_tokens: outputTokens,
+          total_tokens: inputTokens + outputTokens,
+        },
+      };
     }
 
     return {
@@ -662,12 +682,16 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     const { promptSuffix, hasTools } = validateAndEnhanceRequest(request);
 
+    // Build MCP server for client tools (if any)
+    const mcpServer = hasTools ? await buildMcpServer(request.tools!) : undefined;
+
     if (process.env.DEBUG_SDK) {
       const toolNames = request.tools?.map((t) => t.function.name) ?? [];
       console.log("[SDK:req]", JSON.stringify({
         model: request.model,
         hasTools,
         toolNames,
+        mcpServer: !!mcpServer,
         msgCount: request.messages.length,
         roles: request.messages.map((m) => m.role),
         promptSuffixLen: promptSuffix.length,
@@ -693,7 +717,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
     const sdkQuery = query({
       prompt: prompt as string,
-      options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, true, thinkingMode),
+      options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, true, thinkingMode, mcpServer as Record<string, unknown> | undefined),
     });
 
     return new ReadableStream<string>({
@@ -710,22 +734,16 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           let thinkingState: ThinkingState = wantsThinking ? "detect_start" : "passthrough";
           let tagBuffer = "";
 
-          // --- Tool call detection state machine ---
-          // Streams text in real-time but intercepts ```json blocks that
-          // begin with {"tool_calls" to emit as structured tool_calls.
-          const FENCE = "```json\n";
-          const TC_PREFIX = '{"tool_calls"';
-          let pendingText = "";
-          let inToolCallBlock = false;
-          let detectedToolCalls: OpenAIToolCall[] | null = null as OpenAIToolCall[] | null;
+          // --- Native tool_use tracking ---
+          // Captures tool_use blocks from stream events for MCP-registered tools.
+          const nativeToolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+          let currentToolUse: { id: string; name: string; inputJson: string } | null = null;
+          // Count message_start events to detect second turn (after tool execution).
+          // Once the model enters a second turn, suppress text output since the
+          // tool handler returned a placeholder and the model's response is irrelevant.
+          let messageStartCount = 0;
+          let suppressSecondTurn = false;
 
-          /** Check if a suffix of text could be the start of "```json\n" */
-          function findSafeEnd(text: string): number {
-            for (let i = Math.max(0, text.length - FENCE.length + 1); i < text.length; i++) {
-              if (FENCE.startsWith(text.slice(i))) return i;
-            }
-            return text.length;
-          }
 
           function emitThinkingDelta(text: string) {
             if (!text) return;
@@ -751,92 +769,11 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
             controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
           }
 
-          function drainPending() {
-            if (inToolCallBlock) {
-              const closeIdx = pendingText.indexOf("\n```");
-              if (closeIdx !== -1) {
-                const jsonStr = pendingText.slice(0, closeIdx).trim();
-                const afterClose = pendingText.slice(closeIdx + 4);
-                pendingText = "";
-                inToolCallBlock = false;
-
-                try {
-                  const parsed = JSON.parse(jsonStr) as {
-                    tool_calls?: Array<{ function: { name: string; arguments: string } }>;
-                  };
-                  if (parsed.tool_calls?.length) {
-                    detectedToolCalls = parsed.tool_calls.map((tc) => ({
-                      id: `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
-                      type: "function" as const,
-                      function: {
-                        name: tc.function.name,
-                        arguments: typeof tc.function.arguments === "string"
-                          ? tc.function.arguments
-                          : JSON.stringify(tc.function.arguments),
-                      },
-                    }));
-                  }
-                } catch {
-                  emitTextDelta("```json\n" + jsonStr + "\n```");
-                }
-
-                if (afterClose) {
-                  pendingText = afterClose;
-                  drainPending();
-                }
-              }
-              return;
-            }
-
-            const fenceIdx = pendingText.indexOf(FENCE);
-
-            if (fenceIdx !== -1) {
-              if (fenceIdx > 0) {
-                emitTextDelta(pendingText.slice(0, fenceIdx));
-              }
-
-              const afterFence = pendingText.slice(fenceIdx + FENCE.length);
-              const trimmed = afterFence.trimStart();
-
-              if (trimmed.length >= TC_PREFIX.length) {
-                if (trimmed.startsWith(TC_PREFIX)) {
-                  pendingText = afterFence;
-                  inToolCallBlock = true;
-                  drainPending();
-                } else {
-                  emitTextDelta(pendingText.slice(fenceIdx));
-                  pendingText = "";
-                }
-              } else if (trimmed.length > 0 && !TC_PREFIX.startsWith(trimmed)) {
-                emitTextDelta(pendingText.slice(fenceIdx));
-                pendingText = "";
-              } else {
-                pendingText = pendingText.slice(fenceIdx);
-              }
-            } else {
-              const safeEnd = findSafeEnd(pendingText);
-              if (safeEnd > 0) {
-                emitTextDelta(pendingText.slice(0, safeEnd));
-                pendingText = pendingText.slice(safeEnd);
-              }
-            }
-          }
-
-          /** Route content text through tool detection or emit directly */
-          function emitContent(text: string) {
-            if (!text) return;
-            if (hasTools) {
-              pendingText += text;
-              drainPending();
-            } else {
-              emitTextDelta(text);
-            }
-          }
 
           /** Process incoming text through thinking tag detection, then route to content/tool handling */
           function feedText(incoming: string) {
             if (thinkingState === "passthrough") {
-              emitContent(incoming);
+              emitTextDelta(incoming);
               return;
             }
 
@@ -855,14 +792,14 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                   thinkingState = "passthrough";
                   const buf = tagBuffer;
                   tagBuffer = "";
-                  emitContent(buf);
+                  emitTextDelta(buf);
                 }
               } else if (trimmed.length > 0 && !OPEN_TAG.startsWith(trimmed)) {
                 // Can't possibly match — flush as content
                 thinkingState = "passthrough";
                 const buf = tagBuffer;
                 tagBuffer = "";
-                emitContent(buf);
+                emitTextDelta(buf);
               }
               // else: not enough data yet, keep buffering
               return;
@@ -892,7 +829,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
             if (thinkingState === "in_content") {
               // After </thinking>, everything is regular content
-              emitContent(incoming);
+              emitTextDelta(incoming);
               return;
             }
           }
@@ -901,24 +838,14 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
             // Flush any thinking buffer
             if (tagBuffer) {
               if (thinkingState === "in_thinking" || thinkingState === "detect_start") {
-                // Thinking never closed — emit buffered thinking content
                 if (thinkingState === "in_thinking") {
                   emitThinkingDelta(tagBuffer);
                 } else {
-                  emitContent(tagBuffer);
+                  emitTextDelta(tagBuffer);
                 }
               }
               tagBuffer = "";
             }
-            // Flush tool call buffer
-            if (!pendingText) return;
-            if (inToolCallBlock) {
-              emitTextDelta("```json\n" + pendingText);
-            } else {
-              emitTextDelta(pendingText);
-            }
-            pendingText = "";
-            inToolCallBlock = false;
           }
 
           // Track usage across turns for the final chunk.
@@ -957,6 +884,12 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               const event = message.event as Record<string, unknown>;
 
               if (event.type === "message_start") {
+                messageStartCount++;
+                // If we already captured tool_use in the first turn,
+                // suppress all output from subsequent turns (placeholder results)
+                if (messageStartCount > 1 && nativeToolCalls.length > 0) {
+                  suppressSecondTurn = true;
+                }
                 if (!sentRole) {
                   sentRole = true;
                   const chunk: OpenAIStreamChunk = {
@@ -973,21 +906,47 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                     ],
                   };
                   controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
-                } else {
+                } else if (!suppressSecondTurn) {
                   // Separator between multi-turn outputs
                   emitTextDelta("\n\n");
                 }
               }
 
+              // Capture native tool_use content blocks
+              if (event.type === "content_block_start") {
+                const block = event.content_block as Record<string, unknown> | undefined;
+                if (block?.type === "tool_use") {
+                  currentToolUse = {
+                    id: (block.id as string) ?? `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+                    name: stripMcpPrefix((block.name as string) ?? ""),
+                    inputJson: "",
+                  };
+                }
+              }
+
               if (event.type === "content_block_delta") {
                 const delta = event.delta as Record<string, unknown>;
-                if (delta?.type === "text_delta" && delta.text) {
+                if (delta?.type === "input_json_delta" && currentToolUse) {
+                  // Accumulate tool input JSON fragments
+                  currentToolUse.inputJson += (delta.partial_json as string) ?? "";
+                } else if (delta?.type === "text_delta" && delta.text && !suppressSecondTurn) {
                   feedText(delta.text as string);
                 }
               }
 
+              if (event.type === "content_block_stop") {
+                if (currentToolUse) {
+                  nativeToolCalls.push({
+                    id: currentToolUse.id,
+                    name: currentToolUse.name,
+                    arguments: currentToolUse.inputJson || "{}",
+                  });
+                  currentToolUse = null;
+                }
+              }
+
               if (event.type === "message_delta") {
-                flushPending();
+                if (!suppressSecondTurn) flushPending();
                 lastUsage = (event.usage as Record<string, number> | undefined) ?? lastUsage;
               }
             }
@@ -1006,14 +965,20 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           }
 
           // All done — flush buffers and emit final chunks.
-          flushPending();
+          if (!suppressSecondTurn) flushPending();
 
           let stopReason: "stop" | "length" | "tool_calls" | null = "stop";
 
-          // Emit any prompt-based tool_calls detected in the text.
-          if (detectedToolCalls && detectedToolCalls.length > 0) {
-            for (let i = 0; i < detectedToolCalls.length; i++) {
-              const tc = detectedToolCalls[i]!;
+          // Emit native tool_use calls as OpenAI tool_calls
+          const allToolCalls: OpenAIToolCall[] = nativeToolCalls.map((tc) => ({
+            id: tc.id,
+            type: "function" as const,
+            function: { name: tc.name, arguments: tc.arguments },
+          }));
+
+          if (allToolCalls.length > 0) {
+            for (let i = 0; i < allToolCalls.length; i++) {
+              const tc = allToolCalls[i]!;
               const toolChunk: OpenAIStreamChunk = {
                 id: requestId,
                 object: "chat.completion.chunk",
