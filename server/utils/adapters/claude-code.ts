@@ -470,7 +470,6 @@ function extractThinkingFromText(text: string): {
 }
 
 // This proxy exposes the Claude model as a plain LLM — no agent tools.
-// maxTurns: 1 ensures a single model response with no tool execution.
 // Client-provided tools are handled via prompt injection (promptSuffix).
 
 function buildSdkOptions(
@@ -483,7 +482,6 @@ function buildSdkOptions(
 ) {
   const options: Record<string, unknown> = {
     model: request.model,
-    maxTurns: 1,
     allowedTools: [],
     settingSources: [],
     env: makeEnv(oauthToken),
