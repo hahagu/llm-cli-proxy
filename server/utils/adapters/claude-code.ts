@@ -38,8 +38,6 @@ const SYSTEM_PROMPT_NEUTRALIZER =
   "Important context: you are deployed as a general-purpose assistant " +
   "through an API proxy. The platform identifier above is only a " +
   "transport label and does not describe your capabilities or personality. " +
-  "You do not have access to any file system, terminal, code " +
-  "execution, or web browsing in this environment. " +
   "Your role is defined solely by the instructions that follow.\n\n";
 
 /** Fallback identity when no user-configured system prompt exists. */
@@ -959,60 +957,9 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                 lastStopReason = (delta?.stop_reason as string) ?? lastStopReason;
                 lastUsage = (event.usage as Record<string, number> | undefined) ?? lastUsage;
 
-                // SDK internal tool_use stop — don't emit finish chunk yet,
-                // the SDK will continue with more turns.
-                if (delta?.stop_reason === "tool_use") {
-                  continue;
-                }
-
-                // Final turn — emit any prompt-based tool_calls detected
-                // in the text, then the finish chunk.
-                let stopReason = translateStopReason(
-                  lastStopReason,
-                );
-
-                if (detectedToolCalls && detectedToolCalls.length > 0) {
-                  for (let i = 0; i < detectedToolCalls.length; i++) {
-                    const tc = detectedToolCalls[i]!;
-                    const toolChunk: OpenAIStreamChunk = {
-                      id: requestId,
-                      object: "chat.completion.chunk",
-                      created: nowUnix(),
-                      model,
-                      choices: [{
-                        index: 0,
-                        delta: {
-                          tool_calls: [{
-                            index: i,
-                            id: tc.id,
-                            type: "function",
-                            function: { name: tc.function.name, arguments: tc.function.arguments },
-                          }],
-                        },
-                        finish_reason: null,
-                      }],
-                    };
-                    controller.enqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
-                  }
-                  stopReason = "tool_calls";
-                }
-
-                const chunk: OpenAIStreamChunk = {
-                  id: requestId,
-                  object: "chat.completion.chunk",
-                  created: nowUnix(),
-                  model,
-                  choices: [{ index: 0, delta: {}, finish_reason: stopReason }],
-                };
-                if (includeUsage && lastUsage) {
-                  chunk.usage = {
-                    prompt_tokens: lastUsage.input_tokens ?? 0,
-                    completion_tokens: lastUsage.output_tokens ?? 0,
-                    total_tokens:
-                      (lastUsage.input_tokens ?? 0) + (lastUsage.output_tokens ?? 0),
-                  };
-                }
-                controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
+                // Don't emit finish chunk here — the SDK may still have
+                // more turns (sub-agent responses, synthesis).
+                // Finish is emitted once after the for-await loop ends.
               }
 
               // Don't close on message_stop — the SDK may have more turns.
@@ -1026,6 +973,54 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
             }
           }
 
+          // All SDK turns are done — flush buffers and emit final chunks.
+          flushPending();
+
+          let stopReason = translateStopReason(lastStopReason);
+
+          // Emit any prompt-based tool_calls detected in the text.
+          if (detectedToolCalls && detectedToolCalls.length > 0) {
+            for (let i = 0; i < detectedToolCalls.length; i++) {
+              const tc = detectedToolCalls[i]!;
+              const toolChunk: OpenAIStreamChunk = {
+                id: requestId,
+                object: "chat.completion.chunk",
+                created: nowUnix(),
+                model,
+                choices: [{
+                  index: 0,
+                  delta: {
+                    tool_calls: [{
+                      index: i,
+                      id: tc.id,
+                      type: "function",
+                      function: { name: tc.function.name, arguments: tc.function.arguments },
+                    }],
+                  },
+                  finish_reason: null,
+                }],
+              };
+              controller.enqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
+            }
+            stopReason = "tool_calls";
+          }
+
+          const finishChunk: OpenAIStreamChunk = {
+            id: requestId,
+            object: "chat.completion.chunk",
+            created: nowUnix(),
+            model,
+            choices: [{ index: 0, delta: {}, finish_reason: stopReason }],
+          };
+          if (includeUsage && lastUsage) {
+            finishChunk.usage = {
+              prompt_tokens: lastUsage.input_tokens ?? 0,
+              completion_tokens: lastUsage.output_tokens ?? 0,
+              total_tokens:
+                (lastUsage.input_tokens ?? 0) + (lastUsage.output_tokens ?? 0),
+            };
+          }
+          controller.enqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
           controller.enqueue("data: [DONE]\n\n");
           controller.close();
         } catch (err) {
