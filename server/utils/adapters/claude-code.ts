@@ -483,11 +483,13 @@ function buildSdkOptions(
 ) {
   const options: Record<string, unknown> = {
     model: request.model,
-    maxTurns: 30,
-    // `tools: []` disables ALL built-in Claude Code tools (Read, Write, Bash,
-    // WebSearch, etc.) so the model can't invoke them.  Client-provided tools
-    // are handled via prompt injection (promptSuffix) instead.
-    // `allowedTools: []` separately means no tools are auto-approved.
+    // Single turn only — the proxy uses prompt-based tool calling where the
+    // client manages the tool loop via follow-up requests.  Multiple SDK
+    // turns would let the model invoke built-in tools autonomously, producing
+    // narration like "let me search…" without returning results to the client.
+    maxTurns: 1,
+    // `tools: []` attempts to disable built-in tools (may be a no-op in
+    // some SDK versions, but maxTurns:1 is the hard backstop).
     tools: [],
     allowedTools: [],
     settingSources: [],
