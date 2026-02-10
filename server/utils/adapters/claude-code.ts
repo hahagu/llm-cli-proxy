@@ -639,6 +639,18 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     const { promptSuffix, hasTools } = validateAndEnhanceRequest(request);
 
+    if (process.env.DEBUG_SDK) {
+      const toolNames = request.tools?.map((t) => t.function.name) ?? [];
+      console.log("[SDK:req]", JSON.stringify({
+        model: request.model,
+        hasTools,
+        toolNames,
+        msgCount: request.messages.length,
+        roles: request.messages.map((m) => m.role),
+        promptSuffixLen: promptSuffix.length,
+      }));
+    }
+
     const multimodal = hasImageContent(request.messages);
     const { systemPrompt, prompt } = multimodal
       ? (() => {
@@ -890,7 +902,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           let lastUsage: Record<string, number> | undefined;
 
           for await (const message of sdkQuery) {
-            // Debug: log every SDK message type to understand what the subprocess yields
+            // Debug: log SDK messages (skip noisy text deltas)
             if (process.env.DEBUG_SDK) {
               const summary: Record<string, unknown> = { type: message.type };
               if ("subtype" in message) summary.subtype = (message as any).subtype;
@@ -898,7 +910,8 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                 const ev = (message as any).event;
                 summary.eventType = ev?.type;
                 if (ev?.type === "content_block_start") summary.blockType = ev?.content_block?.type;
-                if (ev?.type === "content_block_delta") summary.deltaType = ev?.delta?.type;
+                // Skip noisy text deltas
+                if (ev?.type === "content_block_delta") continue;
               }
               if (message.type === "assistant") {
                 const blocks = (message as any).message?.content;
