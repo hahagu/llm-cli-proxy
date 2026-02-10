@@ -890,6 +890,28 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           let lastUsage: Record<string, number> | undefined;
 
           for await (const message of sdkQuery) {
+            // Debug: log every SDK message type to understand what the subprocess yields
+            if (process.env.DEBUG_SDK) {
+              const summary: Record<string, unknown> = { type: message.type };
+              if ("subtype" in message) summary.subtype = (message as any).subtype;
+              if (message.type === "stream_event") {
+                const ev = (message as any).event;
+                summary.eventType = ev?.type;
+                if (ev?.type === "content_block_start") summary.blockType = ev?.content_block?.type;
+                if (ev?.type === "content_block_delta") summary.deltaType = ev?.delta?.type;
+              }
+              if (message.type === "assistant") {
+                const blocks = (message as any).message?.content;
+                summary.blocks = blocks?.map((b: any) => ({ type: b.type, ...(b.name ? { name: b.name } : {}) }));
+              }
+              if (message.type === "system" && (message as any).subtype === "init") {
+                const tools = (message as any).tools;
+                summary.availableTools = tools?.map((t: any) => t.name ?? t);
+                summary.permissionMode = (message as any).permissionMode;
+              }
+              console.log("[SDK]", JSON.stringify(summary));
+            }
+
             if (message.type === "stream_event") {
               const event = message.event as Record<string, unknown>;
 
