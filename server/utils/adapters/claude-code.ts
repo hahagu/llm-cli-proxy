@@ -38,9 +38,9 @@ import { z } from "zod";
 const SYSTEM_PROMPT_NEUTRALIZER =
   "Important context: you are deployed as a general-purpose assistant " +
   "through an API proxy. The platform identifier above is only a " +
-  "transport label — ignore any platform tool descriptions or " +
-  "capabilities it mentions. Your role and tools are defined solely " +
-  "by the instructions that follow.\n\n";
+  "transport label — ignore any platform-specific instructions it " +
+  "mentions. Your role is defined by the instructions that follow. " +
+  "Use the tools available to you when appropriate.\n\n";
 
 /** Fallback identity when no user-configured system prompt exists. */
 const DEFAULT_SYSTEM_PROMPT =
@@ -584,8 +584,12 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           } else if (block.type === "tool_use") {
             // Native tool_use block — capture for OpenAI tool_calls
             const tb = block as { id?: string; name?: string; input?: unknown };
+            const rawId = tb.id ?? "";
+            const callId = rawId.startsWith("toolu_")
+              ? `call_${rawId.slice(6)}`
+              : rawId || `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
             nativeToolCalls.push({
-              id: tb.id ?? `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+              id: callId,
               name: stripMcpPrefix(tb.name ?? ""),
               arguments: typeof tb.input === "string" ? tb.input : JSON.stringify(tb.input ?? {}),
             });
@@ -916,8 +920,13 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               if (event.type === "content_block_start") {
                 const block = event.content_block as Record<string, unknown> | undefined;
                 if (block?.type === "tool_use") {
+                  // Convert Anthropic tool_use ID (toolu_xxx) to OpenAI format (call_xxx)
+                  const rawId = (block.id as string) ?? "";
+                  const callId = rawId.startsWith("toolu_")
+                    ? `call_${rawId.slice(6)}`
+                    : rawId || `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
                   currentToolUse = {
-                    id: (block.id as string) ?? `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+                    id: callId,
                     name: stripMcpPrefix((block.name as string) ?? ""),
                     inputJson: "",
                   };
