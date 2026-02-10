@@ -59,6 +59,10 @@ export default defineNuxtConfig({
     // Dockerfile runner stage via a separate install step.
     externals: {
       trace: false,
+      // Local convex/_generated/ is application code, not an npm package.
+      // The ~~ alias is resolved before the externals plugin runs, so we
+      // need an explicit inline rule to prevent it from being externalized.
+      inline: ["convex/_generated"],
     },
     rollupConfig: {
       // Tree-shaking analyzes the entire dependency graph to remove unused
