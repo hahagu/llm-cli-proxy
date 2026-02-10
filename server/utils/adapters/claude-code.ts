@@ -483,11 +483,13 @@ function buildSdkOptions(
 ) {
   const options: Record<string, unknown> = {
     model: request.model,
-    maxTurns: 30,
-    // `tools: []` disables ALL built-in Claude Code tools (Read, Write, Bash,
-    // WebSearch, etc.) so the model can't invoke them.  Client-provided tools
-    // are handled via prompt injection (promptSuffix) instead.
-    // `allowedTools: []` separately means no tools are auto-approved.
+    // Single turn only — the proxy uses prompt-based tool calling where the
+    // client manages the tool loop via follow-up requests.  Multiple SDK
+    // turns would let the model invoke built-in tools autonomously, producing
+    // narration like "let me search…" without returning results to the client.
+    maxTurns: 1,
+    // `tools: []` attempts to disable built-in tools (may be a no-op in
+    // some SDK versions, but maxTurns:1 is the hard backstop).
     tools: [],
     allowedTools: [],
     settingSources: [],
@@ -559,9 +561,9 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
       }
 
       if (message.type === "result") {
-        if (message.subtype === "success") {
-          inputTokens = message.usage.input_tokens ?? 0;
-          outputTokens = message.usage.output_tokens ?? 0;
+        if (message.subtype === "success" || message.subtype === "error_max_turns") {
+          inputTokens = (message as any).usage?.input_tokens ?? 0;
+          outputTokens = (message as any).usage?.output_tokens ?? 0;
         } else {
           const errors = (message as { errors?: string[] }).errors;
           throw providerError(
@@ -927,11 +929,16 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               }
             }
 
-            if (message.type === "result" && message.subtype !== "success") {
-              const errors = (message as { errors?: string[] }).errors;
-              throw providerError(
-                `Claude Code error: ${errors?.join("; ") || message.subtype}`,
-              );
+            if (message.type === "result") {
+              if (message.subtype === "success" || message.subtype === "error_max_turns") {
+                // Graceful stop — return whatever text was produced.
+                lastUsage = ((message as any).usage as Record<string, number> | undefined) ?? lastUsage;
+              } else {
+                const errors = (message as { errors?: string[] }).errors;
+                throw providerError(
+                  `Claude Code error: ${errors?.join("; ") || message.subtype}`,
+                );
+              }
             }
           }
 
