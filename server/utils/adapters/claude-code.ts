@@ -602,7 +602,15 @@ function buildSdkOptions(
   const effort = resolveThinkingEffort(request);
   const thinkingSuffix = buildThinkingPrompt(thinkingMode, effort);
 
-  options.systemPrompt = SYSTEM_PROMPT_NEUTRALIZER + base + promptSuffix + thinkingSuffix;
+  // When tools are available, nudge the model to provide complete arguments
+  // matching the tool schema. Without this, the model sometimes calls tools
+  // with empty {} arguments (especially for complex nested schemas).
+  const toolHint = mcpServer
+    ? "\n\nWhen calling tools, you must provide complete arguments that strictly " +
+      "match each tool's parameter schema. Never call a tool with empty or partial arguments."
+    : "";
+
+  options.systemPrompt = SYSTEM_PROMPT_NEUTRALIZER + base + promptSuffix + toolHint + thinkingSuffix;
 
   if (streaming) {
     options.includePartialMessages = true;
@@ -830,7 +838,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               object: "chat.completion.chunk",
               created: nowUnix(),
               model,
-              choices: [{ index: 0, delta: { reasoning_content: text }, finish_reason: null }],
+              choices: [{ index: 0, delta: { reasoning_content: text }, logprobs: null, finish_reason: null }],
             };
             controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
           }
@@ -842,7 +850,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               object: "chat.completion.chunk",
               created: nowUnix(),
               model,
-              choices: [{ index: 0, delta: { content: text }, finish_reason: null }],
+              choices: [{ index: 0, delta: { content: text }, logprobs: null, finish_reason: null }],
             };
             controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
           }
@@ -978,7 +986,8 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                     choices: [
                       {
                         index: 0,
-                        delta: { role: "assistant", content: "" },
+                        delta: { role: "assistant", content: null },
+                        logprobs: null,
                         finish_reason: null,
                       },
                     ],
@@ -1022,6 +1031,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                           function: { name: toolName, arguments: "" },
                         }],
                       },
+                      logprobs: null,
                       finish_reason: null,
                     }],
                   };
@@ -1052,6 +1062,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                             function: { arguments: fragment },
                           }],
                         },
+                        logprobs: null,
                         finish_reason: null,
                       }],
                     };
@@ -1110,7 +1121,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
             object: "chat.completion.chunk",
             created: nowUnix(),
             model,
-            choices: [{ index: 0, delta: {}, finish_reason: stopReason }],
+            choices: [{ index: 0, delta: {}, logprobs: null, finish_reason: stopReason }],
           };
           if (includeUsage && lastUsage) {
             finishChunk.usage = {
@@ -1122,8 +1133,12 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           }
           controller.enqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
           controller.enqueue("data: [DONE]\n\n");
+          if (process.env.DEBUG_SDK) {
+            console.log("[SSE:done]", JSON.stringify({ requestId, stopReason, toolCalls: nativeToolCalls.length }));
+          }
           controller.close();
         } catch (err) {
+          console.error("[SSE:error]", err);
           controller.error(err);
         }
       },
