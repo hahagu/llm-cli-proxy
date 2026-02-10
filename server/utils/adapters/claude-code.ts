@@ -579,6 +579,10 @@ function buildSdkOptions(
     // Disable all built-in SDK tools (Read, Write, Bash, etc.)
     tools: [],
     settingSources: [],
+    // Each API request is stateless — we manage history via OpenAI messages.
+    // Without this, the SDK saves sessions to ~/.claude/projects/ and the
+    // model may see prior conversation context in new chats.
+    persistSession: false,
     env: makeEnv(oauthToken),
   };
 
