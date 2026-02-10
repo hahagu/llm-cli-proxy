@@ -1013,12 +1013,13 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                 }
               }
 
-              // Buffer native tool_use blocks and emit complete tool_calls at
-              // content_block_stop. LobeChat processes tool calls as soon as it
-              // sees the first chunk — if we stream arguments incrementally, it
-              // starts executing with partial/empty args before fragments arrive.
-              // By buffering and emitting the complete call in one chunk, the
-              // client always sees the full arguments.
+              // Two-phase tool_call emission (matches standard OpenAI streaming):
+              // Phase 1 (content_block_start): emit initial chunk with id, name,
+              //   arguments:"" — registers the tool call with the client.
+              // Phase 2 (content_block_stop): emit argument-only delta with the
+              //   complete buffered arguments in a single chunk.
+              // Arguments are buffered during input_json_delta events (with SSE
+              // keepalives) to prevent clients from executing with partial args.
               if (event.type === "content_block_start") {
                 const block = event.content_block as Record<string, unknown> | undefined;
                 if (block?.type === "tool_use") {
@@ -1034,6 +1035,30 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                   if (process.env.DEBUG_SDK) {
                     console.log("[SDK:tool_use:start]", JSON.stringify({ id: callId, name: toolName, rawId, rawName: block.name }));
                   }
+
+                  // Emit initial tool_call chunk (OpenAI phase 1: register the call).
+                  // This tells the client a tool call is starting, with empty arguments.
+                  // Arguments follow as a separate delta at content_block_stop.
+                  const initChunk: OpenAIStreamChunk = {
+                    id: requestId,
+                    object: "chat.completion.chunk",
+                    created: nowUnix(),
+                    model,
+                    choices: [{
+                      index: 0,
+                      delta: {
+                        tool_calls: [{
+                          index: toolIndex,
+                          id: callId,
+                          type: "function",
+                          function: { name: toolName, arguments: "" },
+                        }],
+                      },
+                      logprobs: null,
+                      finish_reason: null,
+                    }],
+                  };
+                  safeEnqueue(`data: ${JSON.stringify(initChunk)}\n\n`);
                 }
               }
 
@@ -1055,9 +1080,11 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
               if (event.type === "content_block_stop") {
                 if (currentToolUse) {
-                  // Emit the complete tool_call in a single chunk
+                  // Emit buffered arguments as a single delta (OpenAI phase 2).
+                  // The initial chunk (with id/name) was already sent at
+                  // content_block_start. This delta only carries the arguments.
                   const completeArgs = currentToolArgBuffer || "{}";
-                  const toolChunk: OpenAIStreamChunk = {
+                  const argChunk: OpenAIStreamChunk = {
                     id: requestId,
                     object: "chat.completion.chunk",
                     created: nowUnix(),
@@ -1067,16 +1094,14 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                       delta: {
                         tool_calls: [{
                           index: currentToolUse.index,
-                          id: currentToolUse.id,
-                          type: "function",
-                          function: { name: currentToolUse.name, arguments: completeArgs },
+                          function: { arguments: completeArgs },
                         }],
                       },
                       logprobs: null,
                       finish_reason: null,
                     }],
                   };
-                  safeEnqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
+                  safeEnqueue(`data: ${JSON.stringify(argChunk)}\n\n`);
 
                   nativeToolCalls.push({
                     id: currentToolUse.id,
