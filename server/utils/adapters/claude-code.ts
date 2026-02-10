@@ -482,6 +482,7 @@ function buildSdkOptions(
 ) {
   const options: Record<string, unknown> = {
     model: request.model,
+    maxTurns: 10,
     allowedTools: [],
     settingSources: [],
     env: makeEnv(oauthToken),
