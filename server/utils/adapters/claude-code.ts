@@ -904,25 +904,30 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           for await (const message of sdkQuery) {
             // Debug: log SDK messages (skip noisy text deltas)
             if (process.env.DEBUG_SDK) {
+              let logIt = false;
               const summary: Record<string, unknown> = { type: message.type };
-              if ("subtype" in message) summary.subtype = (message as any).subtype;
+              if ("subtype" in message) { summary.subtype = (message as any).subtype; logIt = true; }
               if (message.type === "stream_event") {
                 const ev = (message as any).event;
-                summary.eventType = ev?.type;
-                if (ev?.type === "content_block_start") summary.blockType = ev?.content_block?.type;
-                // Skip noisy text deltas
-                if (ev?.type === "content_block_delta") continue;
+                // Skip noisy text deltas from logging (but still process them below)
+                if (ev?.type !== "content_block_delta") {
+                  summary.eventType = ev?.type;
+                  if (ev?.type === "content_block_start") summary.blockType = ev?.content_block?.type;
+                  logIt = true;
+                }
               }
               if (message.type === "assistant") {
                 const blocks = (message as any).message?.content;
                 summary.blocks = blocks?.map((b: any) => ({ type: b.type, ...(b.name ? { name: b.name } : {}) }));
+                logIt = true;
               }
               if (message.type === "system" && (message as any).subtype === "init") {
                 const tools = (message as any).tools;
                 summary.availableTools = tools?.map((t: any) => t.name ?? t);
                 summary.permissionMode = (message as any).permissionMode;
+                logIt = true;
               }
-              console.log("[SDK]", JSON.stringify(summary));
+              if (logIt) console.log("[SDK]", JSON.stringify(summary));
             }
 
             if (message.type === "stream_event") {
