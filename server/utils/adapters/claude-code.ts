@@ -39,7 +39,8 @@ const SYSTEM_PROMPT_NEUTRALIZER =
   "through an API proxy. The platform identifier above is only a " +
   "transport label and does not describe your capabilities or personality. " +
   "You do not have access to any file system, terminal, code " +
-  "execution, web browsing, or agentic features in this environment. " +
+  "execution, or web browsing in this environment. You may delegate " +
+  "sub-tasks when it would be helpful. " +
   "Your role is defined solely by the instructions that follow.\n\n";
 
 /** Fallback identity when no user-configured system prompt exists. */
@@ -693,6 +694,12 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           let inToolCallBlock = false;
           let detectedToolCalls: OpenAIToolCall[] | null = null as OpenAIToolCall[] | null;
 
+          // --- SDK tool_use interception ---
+          // Streams Task tool_use blocks as OpenAI tool_call deltas in
+          // real-time so the client renders sub-task cards progressively.
+          let sdkToolCallIndex = 0;       // increments per tool_use in a turn
+          let inSdkToolUse = false;       // true while streaming a tool_use block
+
           /** Check if a suffix of text could be the start of "```json\n" */
           function findSafeEnd(text: string): number {
             for (let i = Math.max(0, text.length - FENCE.length + 1); i < text.length; i++) {
@@ -895,45 +902,121 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
             inToolCallBlock = false;
           }
 
+          // Track the last stop reason and usage across all turns so
+          // we can emit them once when the SDK is truly done.
+          let lastStopReason: string | null = null;
+          let lastUsage: Record<string, number> | undefined;
+
           for await (const message of sdkQuery) {
             if (message.type === "stream_event") {
               const event = message.event as Record<string, unknown>;
 
-              if (event.type === "message_start" && !sentRole) {
-                sentRole = true;
-                const chunk: OpenAIStreamChunk = {
-                  id: requestId,
-                  object: "chat.completion.chunk",
-                  created: nowUnix(),
-                  model,
-                  choices: [
-                    {
+              if (event.type === "message_start") {
+                if (!sentRole) {
+                  sentRole = true;
+                  const chunk: OpenAIStreamChunk = {
+                    id: requestId,
+                    object: "chat.completion.chunk",
+                    created: nowUnix(),
+                    model,
+                    choices: [
+                      {
+                        index: 0,
+                        delta: { role: "assistant", content: "" },
+                        finish_reason: null,
+                      },
+                    ],
+                  };
+                  controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
+                } else {
+                  // Separator between multi-turn outputs
+                  emitTextDelta("\n\n");
+                }
+              }
+
+              if (event.type === "content_block_start") {
+                const block = event.content_block as Record<string, unknown>;
+                if (block?.type === "tool_use") {
+                  inSdkToolUse = true;
+                  // Emit initial tool_call delta with id + name (empty arguments)
+                  const toolChunk: OpenAIStreamChunk = {
+                    id: requestId,
+                    object: "chat.completion.chunk",
+                    created: nowUnix(),
+                    model,
+                    choices: [{
                       index: 0,
-                      delta: { role: "assistant", content: "" },
+                      delta: {
+                        tool_calls: [{
+                          index: sdkToolCallIndex,
+                          id: `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+                          type: "function",
+                          function: { name: block.name as string, arguments: "" },
+                        }],
+                      },
                       finish_reason: null,
-                    },
-                  ],
-                };
-                controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
+                    }],
+                  };
+                  controller.enqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
+                }
               }
 
               if (event.type === "content_block_delta") {
                 const delta = event.delta as Record<string, unknown>;
                 if (delta?.type === "text_delta" && delta.text) {
                   feedText(delta.text as string);
+                } else if (delta?.type === "input_json_delta" && inSdkToolUse) {
+                  // Stream arguments fragment for the current tool_call
+                  const toolChunk: OpenAIStreamChunk = {
+                    id: requestId,
+                    object: "chat.completion.chunk",
+                    created: nowUnix(),
+                    model,
+                    choices: [{
+                      index: 0,
+                      delta: {
+                        tool_calls: [{
+                          index: sdkToolCallIndex,
+                          function: { arguments: delta.partial_json as string },
+                        }],
+                      },
+                      finish_reason: null,
+                    }],
+                  };
+                  controller.enqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
+                }
+              }
+
+              if (event.type === "content_block_stop") {
+                if (inSdkToolUse) {
+                  inSdkToolUse = false;
+                  sdkToolCallIndex++;
                 }
               }
 
               if (event.type === "message_delta") {
-                // Flush any remaining held-back text before finishing
+                // Flush any remaining held-back text
                 flushPending();
 
                 const delta = event.delta as Record<string, unknown>;
+                lastStopReason = (delta?.stop_reason as string) ?? lastStopReason;
+                lastUsage = (event.usage as Record<string, number> | undefined) ?? lastUsage;
+
+                // If this is an intermediate turn (tool_use), the
+                // tool_call deltas were already streamed in real-time
+                // via content_block_start/delta. Reset the index for
+                // the next turn and let the SDK continue.
+                if (delta?.stop_reason === "tool_use") {
+                  sdkToolCallIndex = 0;
+                  continue;
+                }
+
+                // Final turn — emit any prompt-based tool_calls detected
+                // in the text, then the finish chunk.
                 let stopReason = translateStopReason(
-                  delta?.stop_reason as string | null,
+                  lastStopReason,
                 );
 
-                // Emit structured tool_calls if detected
                 if (detectedToolCalls && detectedToolCalls.length > 0) {
                   for (let i = 0; i < detectedToolCalls.length; i++) {
                     const tc = detectedToolCalls[i]!;
@@ -967,25 +1050,18 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                   model,
                   choices: [{ index: 0, delta: {}, finish_reason: stopReason }],
                 };
-                if (includeUsage) {
-                  const usage = event.usage as
-                    | Record<string, number>
-                    | undefined;
-                  if (usage) {
-                    chunk.usage = {
-                      prompt_tokens: usage.input_tokens ?? 0,
-                      completion_tokens: usage.output_tokens ?? 0,
-                      total_tokens:
-                        (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0),
-                    };
-                  }
+                if (includeUsage && lastUsage) {
+                  chunk.usage = {
+                    prompt_tokens: lastUsage.input_tokens ?? 0,
+                    completion_tokens: lastUsage.output_tokens ?? 0,
+                    total_tokens:
+                      (lastUsage.input_tokens ?? 0) + (lastUsage.output_tokens ?? 0),
+                  };
                 }
                 controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
               }
 
-              if (event.type === "message_stop") {
-                controller.enqueue("data: [DONE]\n\n");
-              }
+              // Don't close on message_stop — the SDK may have more turns.
             }
 
             if (message.type === "result" && message.subtype !== "success") {
@@ -996,9 +1072,8 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
             }
           }
 
-          if (!sentRole) {
-            controller.enqueue("data: [DONE]\n\n");
-          }
+          // SDK is done — close the stream.
+          controller.enqueue("data: [DONE]\n\n");
           controller.close();
         } catch (err) {
           controller.error(err);
