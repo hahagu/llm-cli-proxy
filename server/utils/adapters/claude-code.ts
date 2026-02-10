@@ -1052,81 +1052,36 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
           // --- Phase 2: Execute accumulated sub-tasks with streaming ---
           if (hasSubTasks && pendingSubTasks.length > 0) {
-            const subResults: Array<{ description: string; result: string }> = [];
-
             for (const task of pendingSubTasks) {
               emitTextDelta(`\n\n---\n**${task.description}**\n\n`);
 
-              let taskResult = "";
-              const subQuery = query({
-                prompt: task.prompt,
-                options: {
-                  model: request.model,
-                  maxTurns: 1,
-                  allowedTools: [],
-                  settingSources: [],
-                  env: makeEnv(providerApiKey),
-                  systemPrompt: "You are a helpful research assistant. Provide a thorough, focused response.",
-                  includePartialMessages: true,
-                },
-              });
+              try {
+                const subQuery = query({
+                  prompt: task.prompt,
+                  options: {
+                    model: request.model,
+                    maxTurns: 1,
+                    allowedTools: [],
+                    settingSources: [],
+                    env: makeEnv(providerApiKey),
+                    systemPrompt: "You are a helpful research assistant. Provide a thorough, focused response.",
+                    includePartialMessages: true,
+                  },
+                });
 
-              for await (const msg of subQuery) {
-                if (msg.type === "stream_event") {
-                  const evt = msg.event as Record<string, unknown>;
-                  if (evt.type === "content_block_delta") {
-                    const d = evt.delta as Record<string, unknown>;
-                    if (d?.type === "text_delta" && d.text) {
-                      emitTextDelta(d.text as string);
-                      taskResult += d.text as string;
+                for await (const msg of subQuery) {
+                  if (msg.type === "stream_event") {
+                    const evt = msg.event as Record<string, unknown>;
+                    if (evt.type === "content_block_delta") {
+                      const d = evt.delta as Record<string, unknown>;
+                      if (d?.type === "text_delta" && d.text) {
+                        emitTextDelta(d.text as string);
+                      }
                     }
                   }
                 }
-              }
-
-              subResults.push({ description: task.description, result: taskResult });
-            }
-
-            // --- Phase 3: Synthesis ---
-            emitTextDelta("\n\n---\n\n");
-
-            const originalUserContent = request.messages
-              .filter((m) => m.role === "user")
-              .map((m) => extractTextContent(m.content))
-              .join("\n");
-
-            const synthesisContext = subResults
-              .map((r) => `[${r.description}]:\n${r.result}`)
-              .join("\n\n");
-
-            const synthQuery = query({
-              prompt:
-                `The user asked:\n"${originalUserContent}"\n\n` +
-                `Research results:\n${synthesisContext}\n\n` +
-                `Provide a final, synthesized answer using the research above.`,
-              options: {
-                model: request.model,
-                maxTurns: 1,
-                allowedTools: [],
-                settingSources: [],
-                env: makeEnv(providerApiKey),
-                systemPrompt:
-                  SYSTEM_PROMPT_NEUTRALIZER +
-                  (systemPrompt ?? DEFAULT_SYSTEM_PROMPT) +
-                  promptSuffix,
-                includePartialMessages: true,
-              },
-            });
-
-            for await (const msg of synthQuery) {
-              if (msg.type === "stream_event") {
-                const evt = msg.event as Record<string, unknown>;
-                if (evt.type === "content_block_delta") {
-                  const d = evt.delta as Record<string, unknown>;
-                  if (d?.type === "text_delta" && d.text) {
-                    emitTextDelta(d.text as string);
-                  }
-                }
+              } catch {
+                emitTextDelta("\n\n*Sub-task failed.*\n");
               }
             }
 
