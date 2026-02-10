@@ -24,9 +24,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 WORKDIR /app
 COPY --from=build /app/.output ./.output
 COPY --from=prod-deps /app/node_modules ./node_modules
-# Local convex generated code is referenced by absolute path in the Nitro
-# output when externals tracing is disabled
-COPY --from=build /app/convex/_generated ./convex/_generated
 
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
