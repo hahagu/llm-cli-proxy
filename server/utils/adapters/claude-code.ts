@@ -856,7 +856,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           // clients like LobeChat expect.
           const nativeToolCalls: Array<{ id: string; name: string }> = [];
           let currentToolUse: { id: string; name: string; index: number } | null = null;
-          let currentToolArgLen = 0; // accumulated argument bytes for debug logging
+          let currentToolArgBuffer = ""; // accumulated argument JSON for buffered emission
           // Count message_start events to detect second turn (after tool execution).
           // Once the model enters a second turn, suppress text output since the
           // tool handler returned a placeholder and the model's response is irrelevant.
@@ -1032,11 +1032,12 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                 }
               }
 
-              // Stream native tool_use blocks as OpenAI-format tool_calls in real-time.
-              // This matches the incremental streaming format clients expect:
-              //   1. content_block_start → initial chunk with id, name, arguments:""
-              //   2. content_block_delta → argument fragment chunks
-              //   3. content_block_stop  → record completion (no extra emission)
+              // Buffer native tool_use blocks and emit complete tool_calls at
+              // content_block_stop. LobeChat processes tool calls as soon as it
+              // sees the first chunk — if we stream arguments incrementally, it
+              // starts executing with partial/empty args before fragments arrive.
+              // By buffering and emitting the complete call in one chunk, the
+              // client always sees the full arguments.
               if (event.type === "content_block_start") {
                 const block = event.content_block as Record<string, unknown> | undefined;
                 if (block?.type === "tool_use") {
@@ -1047,32 +1048,10 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                   const toolName = stripMcpPrefix((block.name as string) ?? "");
                   const toolIndex = nativeToolCalls.length;
                   currentToolUse = { id: callId, name: toolName, index: toolIndex };
-                  currentToolArgLen = 0;
-
-                  // Emit initial tool_call chunk (id + name + empty arguments)
-                  const initChunk: OpenAIStreamChunk = {
-                    id: requestId,
-                    object: "chat.completion.chunk",
-                    created: nowUnix(),
-                    model,
-                    choices: [{
-                      index: 0,
-                      delta: {
-                        tool_calls: [{
-                          index: toolIndex,
-                          id: callId,
-                          type: "function",
-                          function: { name: toolName, arguments: "" },
-                        }],
-                      },
-                      logprobs: null,
-                      finish_reason: null,
-                    }],
-                  };
-                  safeEnqueue(`data: ${JSON.stringify(initChunk)}\n\n`);
+                  currentToolArgBuffer = "";
 
                   if (process.env.DEBUG_SDK) {
-                    console.log("[SDK:tool_use:start]", JSON.stringify({ id: callId, name: toolName, rawId, rawName: block.name, hasId: "id" in block, hasName: "name" in block }));
+                    console.log("[SDK:tool_use:start]", JSON.stringify({ id: callId, name: toolName, rawId, rawName: block.name }));
                   }
                 }
               }
@@ -1080,28 +1059,10 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               if (event.type === "content_block_delta") {
                 const delta = event.delta as Record<string, unknown>;
                 if (delta?.type === "input_json_delta" && currentToolUse) {
-                  // Stream argument fragment to client
+                  // Buffer argument fragment — will be emitted at content_block_stop
                   const fragment = (delta.partial_json as string) ?? "";
                   if (fragment) {
-                    currentToolArgLen += fragment.length;
-                    const argChunk: OpenAIStreamChunk = {
-                      id: requestId,
-                      object: "chat.completion.chunk",
-                      created: nowUnix(),
-                      model,
-                      choices: [{
-                        index: 0,
-                        delta: {
-                          tool_calls: [{
-                            index: currentToolUse.index,
-                            function: { arguments: fragment },
-                          }],
-                        },
-                        logprobs: null,
-                        finish_reason: null,
-                      }],
-                    };
-                    safeEnqueue(`data: ${JSON.stringify(argChunk)}\n\n`);
+                    currentToolArgBuffer += fragment;
                   }
                 } else if (delta?.type === "text_delta" && delta.text && !suppressSecondTurn) {
                   feedText(delta.text as string);
@@ -1110,18 +1071,38 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
               if (event.type === "content_block_stop") {
                 if (currentToolUse) {
+                  // Emit the complete tool_call in a single chunk
+                  const completeArgs = currentToolArgBuffer || "{}";
+                  const toolChunk: OpenAIStreamChunk = {
+                    id: requestId,
+                    object: "chat.completion.chunk",
+                    created: nowUnix(),
+                    model,
+                    choices: [{
+                      index: 0,
+                      delta: {
+                        tool_calls: [{
+                          index: currentToolUse.index,
+                          id: currentToolUse.id,
+                          type: "function",
+                          function: { name: currentToolUse.name, arguments: completeArgs },
+                        }],
+                      },
+                      logprobs: null,
+                      finish_reason: null,
+                    }],
+                  };
+                  safeEnqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
+
                   nativeToolCalls.push({
                     id: currentToolUse.id,
                     name: currentToolUse.name,
                   });
                   if (process.env.DEBUG_SDK) {
-                    console.log("[SDK:tool_use:args]", JSON.stringify({ id: currentToolUse.id, name: currentToolUse.name, argLen: currentToolArgLen }));
-                  }
-                  currentToolArgLen = 0;
-                  if (process.env.DEBUG_SDK) {
-                    console.log("[SDK:tool_use:captured]", JSON.stringify({ id: currentToolUse.id, name: currentToolUse.name, index: currentToolUse.index }));
+                    console.log("[SDK:tool_use:complete]", JSON.stringify({ id: currentToolUse.id, name: currentToolUse.name, argLen: completeArgs.length }));
                   }
                   currentToolUse = null;
+                  currentToolArgBuffer = "";
                 }
               }
 
