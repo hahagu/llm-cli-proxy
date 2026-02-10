@@ -486,11 +486,9 @@ function extractThinkingFromText(text: string): {
 }
 
 // The Task tool lets Claude spawn parallel sub-queries.
-// In streaming mode we use maxTurns: 1 so the SDK stops after the
-// first assistant turn — we then execute sub-tasks ourselves and
-// relay each sub-agent's tokens to the client in real-time.
-// In non-streaming mode the SDK handles the full multi-turn loop
-// internally (maxTurns: 50) since there is no token streaming to do.
+// The SDK handles the full multi-turn loop internally (maxTurns: 50).
+// Tool_use blocks from stream events are silently consumed — only
+// text content is relayed to the client as standard OpenAI chunks.
 
 function buildSdkOptions(
   request: OpenAIChatRequest,
@@ -502,7 +500,7 @@ function buildSdkOptions(
 ) {
   const options: Record<string, unknown> = {
     model: request.model,
-    maxTurns: streaming ? 1 : 50,
+    maxTurns: 50,
     allowedTools: ["Task"],
     settingSources: [],
     env: makeEnv(oauthToken),
@@ -695,14 +693,8 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           let inToolCallBlock = false;
           let detectedToolCalls: OpenAIToolCall[] | null = null as OpenAIToolCall[] | null;
 
-          // --- SDK sub-task accumulation ---
-          // With maxTurns: 1 the SDK won't execute Task calls.
-          // We accumulate them here and execute + stream them ourselves.
-          interface SubTask { description: string; prompt: string }
-          const pendingSubTasks: SubTask[] = [];
-          let currentToolInput = "";
+          // SDK tool_use blocks are silently consumed — we only relay text.
           let inSdkToolUse = false;
-          let hasSubTasks = false;
 
           /** Check if a suffix of text could be the start of "```json\n" */
           function findSafeEnd(text: string): number {
@@ -942,35 +934,20 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                 const block = event.content_block as Record<string, unknown>;
                 if (block?.type === "tool_use") {
                   inSdkToolUse = true;
-                  currentToolInput = "";
                 }
               }
 
               if (event.type === "content_block_delta") {
                 const delta = event.delta as Record<string, unknown>;
-                if (delta?.type === "text_delta" && delta.text) {
+                if (delta?.type === "text_delta" && delta.text && !inSdkToolUse) {
                   feedText(delta.text as string);
-                } else if (delta?.type === "input_json_delta" && inSdkToolUse) {
-                  currentToolInput += delta.partial_json as string;
                 }
+                // input_json_delta for SDK tool_use blocks is silently consumed
               }
 
               if (event.type === "content_block_stop") {
                 if (inSdkToolUse) {
                   inSdkToolUse = false;
-                  try {
-                    const args = JSON.parse(currentToolInput);
-                    pendingSubTasks.push({
-                      description: args.description || "Sub-task",
-                      prompt: args.prompt || currentToolInput,
-                    });
-                  } catch {
-                    pendingSubTasks.push({
-                      description: "Sub-task",
-                      prompt: currentToolInput,
-                    });
-                  }
-                  currentToolInput = "";
                 }
               }
 
@@ -982,10 +959,9 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                 lastStopReason = (delta?.stop_reason as string) ?? lastStopReason;
                 lastUsage = (event.usage as Record<string, number> | undefined) ?? lastUsage;
 
-                // With maxTurns: 1, the SDK stops here.  We'll
-                // execute the accumulated sub-tasks after the loop.
+                // SDK internal tool_use stop — don't emit finish chunk yet,
+                // the SDK will continue with more turns.
                 if (delta?.stop_reason === "tool_use") {
-                  hasSubTasks = true;
                   continue;
                 }
 
@@ -1042,66 +1018,12 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               // Don't close on message_stop — the SDK may have more turns.
             }
 
-            if (message.type === "result" && message.subtype !== "success" && !hasSubTasks) {
+            if (message.type === "result" && message.subtype !== "success") {
               const errors = (message as { errors?: string[] }).errors;
               throw providerError(
                 `Claude Code error: ${errors?.join("; ") || message.subtype}`,
               );
             }
-          }
-
-          // --- Phase 2: Execute accumulated sub-tasks with streaming ---
-          if (hasSubTasks && pendingSubTasks.length > 0) {
-            for (const task of pendingSubTasks) {
-              emitTextDelta(`\n\n---\n**${task.description}**\n\n`);
-
-              try {
-                const subQuery = query({
-                  prompt: task.prompt,
-                  options: {
-                    model: request.model,
-                    maxTurns: 1,
-                    allowedTools: [],
-                    settingSources: [],
-                    env: makeEnv(providerApiKey),
-                    systemPrompt: "You are a helpful research assistant. Provide a thorough, focused response.",
-                    includePartialMessages: true,
-                  },
-                });
-
-                for await (const msg of subQuery) {
-                  if (msg.type === "stream_event") {
-                    const evt = msg.event as Record<string, unknown>;
-                    if (evt.type === "content_block_delta") {
-                      const d = evt.delta as Record<string, unknown>;
-                      if (d?.type === "text_delta" && d.text) {
-                        emitTextDelta(d.text as string);
-                      }
-                    }
-                  }
-                }
-              } catch {
-                emitTextDelta("\n\n*Sub-task failed.*\n");
-              }
-            }
-
-            // Emit finish chunk for the sub-task path
-            const finishChunk: OpenAIStreamChunk = {
-              id: requestId,
-              object: "chat.completion.chunk",
-              created: nowUnix(),
-              model,
-              choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-            };
-            if (includeUsage && lastUsage) {
-              finishChunk.usage = {
-                prompt_tokens: lastUsage.input_tokens ?? 0,
-                completion_tokens: lastUsage.output_tokens ?? 0,
-                total_tokens:
-                  (lastUsage.input_tokens ?? 0) + (lastUsage.output_tokens ?? 0),
-              };
-            }
-            controller.enqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
           }
 
           controller.enqueue("data: [DONE]\n\n");
