@@ -41,12 +41,16 @@ export default defineNuxtConfig({
 
   nitro: {
     preset: "bun",
-    // Bundle all dependencies into the server output instead of
-    // externalizing + tracing them with @vercel/nft. This eliminates
-    // the two slowest Nitro build steps (node-externals resolution and
-    // dependency tracing) and produces a fully self-contained .output.
-    // https://github.com/nitrojs/nitro/issues/2369
-    noExternals: true,
+    // Use the legacy externals algorithm which caches module resolutions
+    // (~3x faster). https://github.com/nitrojs/nitro/issues/2369
+    experimental: {
+      legacyExternals: true,
+    },
+    // Skip @vercel/nft dependency tracing — the slowest build step.
+    // Runtime dependencies are provided via node_modules in the Dockerfile.
+    externals: {
+      trace: false,
+    },
     minify: false,
     sourceMap: false,
   },
