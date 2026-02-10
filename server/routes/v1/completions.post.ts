@@ -61,7 +61,7 @@ export default defineEventHandler(async (event) => {
   };
 
   try {
-    const result = await executeProxyRequest(chatRequest, keyData);
+    const result = await executeProxyRequest(chatRequest, keyData, "/v1/completions");
 
     if (result.type === "stream" && result.stream) {
       // Transform chat completion stream chunks to legacy completion format

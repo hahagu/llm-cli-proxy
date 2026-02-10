@@ -14,6 +14,14 @@ export interface UsageLog {
   errorMessage?: string;
   createdAt: number;
   apiKeyName?: string;
+  // Request metadata
+  endpoint?: string;
+  streamed?: boolean;
+  messageCount?: number;
+  hasTools?: boolean;
+  temperature?: number;
+  maxTokens?: number;
+  stopReason?: string;
 }
 
 export function useUsageLogs() {

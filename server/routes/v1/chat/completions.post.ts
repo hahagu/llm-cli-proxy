@@ -44,7 +44,7 @@ export default defineEventHandler(async (event) => {
   const body = parsed.data as OpenAIChatRequest;
 
   try {
-    const result = await executeProxyRequest(body, keyData);
+    const result = await executeProxyRequest(body, keyData, "/v1/chat/completions");
 
     if (result.type === "stream" && result.stream) {
       setHeader(event, "Content-Type", "text/event-stream");

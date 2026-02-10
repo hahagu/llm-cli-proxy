@@ -59,6 +59,26 @@ async function applySystemPromptHierarchy(
   return request;
 }
 
+interface RequestMeta {
+  endpoint?: string;
+  streamed?: boolean;
+  messageCount?: number;
+  hasTools?: boolean;
+  temperature?: number;
+  maxTokens?: number;
+  stopReason?: string;
+}
+
+function extractRequestMeta(request: OpenAIChatRequest): RequestMeta {
+  return {
+    streamed: request.stream ?? false,
+    messageCount: request.messages.length,
+    hasTools: (request.tools?.length ?? 0) > 0,
+    temperature: request.temperature,
+    maxTokens: request.max_tokens,
+  };
+}
+
 async function logUsage(
   keyData: ProxyKeyData,
   model: string,
@@ -66,6 +86,7 @@ async function logUsage(
   latencyMs: number,
   usage?: { prompt_tokens: number; completion_tokens: number },
   errorMessage?: string,
+  meta?: RequestMeta,
 ): Promise<void> {
   try {
     const convex = getConvexClient();
@@ -79,6 +100,7 @@ async function logUsage(
       latencyMs,
       statusCode,
       errorMessage,
+      ...meta,
     });
   } catch {
     // Fire-and-forget, don't fail the request
@@ -104,6 +126,7 @@ function sanitizeError(err: unknown): string {
 export async function executeProxyRequest(
   request: OpenAIChatRequest,
   keyData: ProxyKeyData,
+  endpoint?: string,
 ): Promise<ProxyResult> {
   const startTime = Date.now();
 
@@ -111,12 +134,13 @@ export async function executeProxyRequest(
   const requestWithPrompt = await applySystemPromptHierarchy(request, keyData.userId);
 
   const model = requestWithPrompt.model;
+  const meta: RequestMeta = { ...extractRequestMeta(requestWithPrompt), endpoint };
 
   let token: string;
   try {
     token = await getCredentials(keyData.userId);
   } catch {
-    logUsage(keyData, model, 502, Date.now() - startTime, undefined, "No credentials configured");
+    logUsage(keyData, model, 502, Date.now() - startTime, undefined, "No credentials configured", meta);
     throw providerError("Claude Code OAuth not configured for this user.");
   }
 
@@ -125,10 +149,11 @@ export async function executeProxyRequest(
 
     if (requestWithPrompt.stream) {
       const stream = await adapter.stream(requestWithPrompt, token);
-      logUsage(keyData, model, 200, Date.now() - startTime);
+      logUsage(keyData, model, 200, Date.now() - startTime, undefined, undefined, meta);
       return { type: "stream", stream, model };
     } else {
       const data = await adapter.complete(requestWithPrompt, token);
+      const stopReason = data.choices?.[0]?.finish_reason ?? undefined;
       logUsage(
         keyData,
         model,
@@ -140,16 +165,18 @@ export async function executeProxyRequest(
               completion_tokens: data.usage.completion_tokens,
             }
           : undefined,
+        undefined,
+        { ...meta, stopReason },
       );
       return { type: "json", data, model };
     }
   } catch (err) {
     if (err instanceof OpenAIError) {
-      logUsage(keyData, model, err.statusCode, Date.now() - startTime, undefined, err.message);
+      logUsage(keyData, model, err.statusCode, Date.now() - startTime, undefined, err.message, meta);
       throw err;
     }
     const safeError = sanitizeError(err);
-    logUsage(keyData, model, 502, Date.now() - startTime, undefined, safeError);
+    logUsage(keyData, model, 502, Date.now() - startTime, undefined, safeError, meta);
     throw providerError(`Provider failed: ${safeError}`);
   }
 }

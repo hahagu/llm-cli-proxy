@@ -73,7 +73,7 @@ export default defineEventHandler(async (event) => {
   };
 
   try {
-    const result = await executeProxyRequest(openAIRequest, keyData);
+    const result = await executeProxyRequest(openAIRequest, keyData, "/dashboard/test-chat");
 
     if (result.type === "stream" && result.stream) {
       setHeader(event, "Content-Type", "text/event-stream");
