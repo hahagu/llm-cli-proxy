@@ -485,6 +485,11 @@ function extractThinkingFromText(text: string): {
   };
 }
 
+// The Task tool lets Claude spawn parallel sub-queries.  Sub-agents
+// inherit allowedTools minus Task itself, so they run as plain
+// assistants (no SDK tools).
+const MAX_TURNS = 50;
+
 function buildSdkOptions(
   request: OpenAIChatRequest,
   systemPrompt: string | undefined,
@@ -495,8 +500,8 @@ function buildSdkOptions(
 ) {
   const options: Record<string, unknown> = {
     model: request.model,
-    maxTurns: 1,
-    allowedTools: [],
+    maxTurns: MAX_TURNS,
+    allowedTools: ["Task"],
     settingSources: [],
     env: makeEnv(oauthToken),
   };
