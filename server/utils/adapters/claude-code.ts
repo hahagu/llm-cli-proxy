@@ -371,22 +371,6 @@ function makeEnv(oauthToken: string): Record<string, string> {
   return env;
 }
 
-function translateStopReason(
-  reason: string | null | undefined,
-): "stop" | "length" | "tool_calls" | null {
-  switch (reason) {
-    case "end_turn":
-    case "stop_sequence":
-      return "stop";
-    case "max_tokens":
-      return "length";
-    case "tool_use":
-      return "tool_calls";
-    default:
-      return null;
-  }
-}
-
 /** Thinking mode resolved from request parameters. */
 type ThinkingMode = "off" | "forced" | "adaptive";
 
@@ -484,9 +468,13 @@ function extractThinkingFromText(text: string): {
 }
 
 // The Task tool lets Claude spawn parallel sub-queries.
-// The SDK handles the full multi-turn loop internally (maxTurns: 50).
-// Tool_use blocks from stream events are silently consumed — only
-// text content is relayed to the client as standard OpenAI chunks.
+// In streaming mode we use maxTurns: 1 so the SDK stops after the
+// first assistant turn WITHOUT executing tools.  We intercept the
+// Task tool_use blocks and execute each sub-task ourselves as a
+// lightweight query() call (allowedTools: []), streaming tokens to
+// the client in real-time.  No synthesis phase — sub-task output is
+// the final answer.
+// In non-streaming mode the SDK handles everything (maxTurns: 50).
 
 function buildSdkOptions(
   request: OpenAIChatRequest,
@@ -498,7 +486,7 @@ function buildSdkOptions(
 ) {
   const options: Record<string, unknown> = {
     model: request.model,
-    maxTurns: 50,
+    maxTurns: streaming ? 1 : 50,
     allowedTools: ["Task"],
     settingSources: [],
     env: makeEnv(oauthToken),
@@ -691,7 +679,11 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           let inToolCallBlock = false;
           let detectedToolCalls: OpenAIToolCall[] | null = null as OpenAIToolCall[] | null;
 
-          // SDK tool_use blocks are silently consumed — we only relay text.
+          // --- SDK sub-task accumulation (maxTurns: 1) ---
+          // Task tool_use blocks are intercepted and executed manually.
+          interface SubTask { description: string; prompt: string }
+          const pendingSubTasks: SubTask[] = [];
+          let currentToolInput = "";
           let inSdkToolUse = false;
 
           /** Check if a suffix of text could be the start of "```json\n" */
@@ -896,9 +888,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
             inToolCallBlock = false;
           }
 
-          // Track the last stop reason and usage across all turns so
-          // we can emit them once when the SDK is truly done.
-          let lastStopReason: string | null = null;
+          // Track usage across turns for the final chunk.
           let lastUsage: Record<string, number> | undefined;
 
           for await (const message of sdkQuery) {
@@ -932,6 +922,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                 const block = event.content_block as Record<string, unknown>;
                 if (block?.type === "tool_use") {
                   inSdkToolUse = true;
+                  currentToolInput = "";
                 }
               }
 
@@ -939,44 +930,90 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                 const delta = event.delta as Record<string, unknown>;
                 if (delta?.type === "text_delta" && delta.text && !inSdkToolUse) {
                   feedText(delta.text as string);
+                } else if (delta?.type === "input_json_delta" && inSdkToolUse) {
+                  currentToolInput += delta.partial_json as string;
                 }
-                // input_json_delta for SDK tool_use blocks is silently consumed
               }
 
               if (event.type === "content_block_stop") {
                 if (inSdkToolUse) {
                   inSdkToolUse = false;
+                  try {
+                    const args = JSON.parse(currentToolInput);
+                    pendingSubTasks.push({
+                      description: args.description || "Sub-task",
+                      prompt: args.prompt || currentToolInput,
+                    });
+                  } catch {
+                    pendingSubTasks.push({
+                      description: "Sub-task",
+                      prompt: currentToolInput,
+                    });
+                  }
+                  currentToolInput = "";
                 }
               }
 
               if (event.type === "message_delta") {
-                // Flush any remaining held-back text
                 flushPending();
-
-                const delta = event.delta as Record<string, unknown>;
-                lastStopReason = (delta?.stop_reason as string) ?? lastStopReason;
                 lastUsage = (event.usage as Record<string, number> | undefined) ?? lastUsage;
-
-                // Don't emit finish chunk here — the SDK may still have
-                // more turns (sub-agent responses, synthesis).
-                // Finish is emitted once after the for-await loop ends.
               }
 
               // Don't close on message_stop — the SDK may have more turns.
             }
 
+            // With maxTurns: 1, the SDK reports a non-success result when
+            // it stops after a tool_use turn.  That's expected — not an error.
             if (message.type === "result" && message.subtype !== "success") {
-              const errors = (message as { errors?: string[] }).errors;
-              throw providerError(
-                `Claude Code error: ${errors?.join("; ") || message.subtype}`,
-              );
+              if (pendingSubTasks.length === 0) {
+                const errors = (message as { errors?: string[] }).errors;
+                throw providerError(
+                  `Claude Code error: ${errors?.join("; ") || message.subtype}`,
+                );
+              }
             }
           }
 
-          // All SDK turns are done — flush buffers and emit final chunks.
+          // --- Execute accumulated sub-tasks with streaming ---
+          if (pendingSubTasks.length > 0) {
+            for (const task of pendingSubTasks) {
+              emitTextDelta(`\n\n---\n**${task.description}**\n\n`);
+
+              try {
+                const subQuery = query({
+                  prompt: task.prompt,
+                  options: {
+                    model: request.model,
+                    maxTurns: 1,
+                    allowedTools: [],
+                    settingSources: [],
+                    env: makeEnv(providerApiKey),
+                    systemPrompt: "You are a helpful research assistant. Provide a thorough, focused response to the request.",
+                    includePartialMessages: true,
+                  },
+                });
+
+                for await (const msg of subQuery) {
+                  if (msg.type === "stream_event") {
+                    const evt = msg.event as Record<string, unknown>;
+                    if (evt.type === "content_block_delta") {
+                      const d = evt.delta as Record<string, unknown>;
+                      if (d?.type === "text_delta" && d.text) {
+                        emitTextDelta(d.text as string);
+                      }
+                    }
+                  }
+                }
+              } catch {
+                emitTextDelta("\n\n*Sub-task failed.*\n");
+              }
+            }
+          }
+
+          // All done — flush buffers and emit final chunks.
           flushPending();
 
-          let stopReason = translateStopReason(lastStopReason);
+          let stopReason: "stop" | "length" | "tool_calls" | null = "stop";
 
           // Emit any prompt-based tool_calls detected in the text.
           if (detectedToolCalls && detectedToolCalls.length > 0) {
