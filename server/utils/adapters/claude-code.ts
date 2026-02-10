@@ -1059,11 +1059,14 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               if (event.type === "content_block_delta") {
                 const delta = event.delta as Record<string, unknown>;
                 if (delta?.type === "input_json_delta" && currentToolUse) {
-                  // Buffer argument fragment — will be emitted at content_block_stop
+                  // Buffer argument fragment — will be emitted at content_block_stop.
+                  // Send SSE comment as keepalive so the connection doesn't timeout
+                  // during long argument generation (execTasks can take 25s+).
                   const fragment = (delta.partial_json as string) ?? "";
                   if (fragment) {
                     currentToolArgBuffer += fragment;
                   }
+                  safeEnqueue(": keepalive\n\n");
                 } else if (delta?.type === "text_delta" && delta.text && !suppressSecondTurn) {
                   feedText(delta.text as string);
                 }
