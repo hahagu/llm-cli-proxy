@@ -561,9 +561,9 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
       }
 
       if (message.type === "result") {
-        if (message.subtype === "success") {
-          inputTokens = message.usage.input_tokens ?? 0;
-          outputTokens = message.usage.output_tokens ?? 0;
+        if (message.subtype === "success" || message.subtype === "error_max_turns") {
+          inputTokens = (message as any).usage?.input_tokens ?? 0;
+          outputTokens = (message as any).usage?.output_tokens ?? 0;
         } else {
           const errors = (message as { errors?: string[] }).errors;
           throw providerError(
@@ -929,11 +929,16 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               }
             }
 
-            if (message.type === "result" && message.subtype !== "success") {
-              const errors = (message as { errors?: string[] }).errors;
-              throw providerError(
-                `Claude Code error: ${errors?.join("; ") || message.subtype}`,
-              );
+            if (message.type === "result") {
+              if (message.subtype === "success" || message.subtype === "error_max_turns") {
+                // Graceful stop — return whatever text was produced.
+                lastUsage = ((message as any).usage as Record<string, number> | undefined) ?? lastUsage;
+              } else {
+                const errors = (message as { errors?: string[] }).errors;
+                throw providerError(
+                  `Claude Code error: ${errors?.join("; ") || message.subtype}`,
+                );
+              }
             }
           }
 
