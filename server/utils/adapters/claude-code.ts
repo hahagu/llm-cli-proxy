@@ -923,6 +923,9 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                     name: stripMcpPrefix((block.name as string) ?? ""),
                     inputJson: "",
                   };
+                  if (process.env.DEBUG_SDK) {
+                    console.log("[SDK:tool_use:start]", JSON.stringify({ id: callId, name: currentToolUse.name, rawId, rawName: block.name, hasId: "id" in block, hasName: "name" in block }));
+                  }
                 }
               }
 
@@ -943,6 +946,9 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                     name: currentToolUse.name,
                     arguments: currentToolUse.inputJson || "{}",
                   });
+                  if (process.env.DEBUG_SDK) {
+                    console.log("[SDK:tool_use:captured]", JSON.stringify({ id: currentToolUse.id, name: currentToolUse.name, argsLen: currentToolUse.inputJson.length }));
+                  }
                   currentToolUse = null;
                 }
               }
@@ -977,6 +983,10 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
             type: "function" as const,
             function: { name: tc.name, arguments: tc.arguments },
           }));
+
+          if (process.env.DEBUG_SDK) {
+            console.log("[SDK:emit]", JSON.stringify({ nativeToolCalls: nativeToolCalls.length, toolNames: nativeToolCalls.map(tc => tc.name) }));
+          }
 
           if (allToolCalls.length > 0) {
             for (let i = 0; i < allToolCalls.length; i++) {
