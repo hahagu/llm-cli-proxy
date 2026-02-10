@@ -54,6 +54,12 @@ export default defineNuxtConfig({
     // Skip gzip/brotli pre-compression of public assets at build time.
     // A reverse proxy or CDN can handle this at serving time instead.
     compressPublicAssets: false,
+    // Skip @vercel/nft dependency tracing — the most expensive build step.
+    // Instead, production node_modules are provided directly in the
+    // Dockerfile runner stage via a separate install step.
+    externals: {
+      trace: false,
+    },
     rollupConfig: {
       // Tree-shaking analyzes the entire dependency graph to remove unused
       // exports. This is the most expensive Rollup operation and only reduces
