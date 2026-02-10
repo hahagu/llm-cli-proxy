@@ -1014,12 +1014,11 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               }
 
               // Two-phase tool_call emission (matches standard OpenAI streaming):
-              // Phase 1 (content_block_start): emit initial chunk with id, name,
-              //   arguments:"" — registers the tool call with the client.
-              // Phase 2 (content_block_stop): emit argument-only delta with the
-              //   complete buffered arguments in a single chunk.
-              // Arguments are buffered during input_json_delta events (with SSE
-              // keepalives) to prevent clients from executing with partial args.
+              // Phase 1: initial chunk with id, name, arguments:"" (registers call)
+              // Phase 2: argument-only delta with complete buffered args
+              // BOTH phases are emitted together at content_block_stop so the
+              // client can't execute between them with empty arguments.
+              // During buffering, SSE keepalive comments prevent timeouts.
               if (event.type === "content_block_start") {
                 const block = event.content_block as Record<string, unknown> | undefined;
                 if (block?.type === "tool_use") {
@@ -1035,30 +1034,6 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                   if (process.env.DEBUG_SDK) {
                     console.log("[SDK:tool_use:start]", JSON.stringify({ id: callId, name: toolName, rawId, rawName: block.name }));
                   }
-
-                  // Emit initial tool_call chunk (OpenAI phase 1: register the call).
-                  // This tells the client a tool call is starting, with empty arguments.
-                  // Arguments follow as a separate delta at content_block_stop.
-                  const initChunk: OpenAIStreamChunk = {
-                    id: requestId,
-                    object: "chat.completion.chunk",
-                    created: nowUnix(),
-                    model,
-                    choices: [{
-                      index: 0,
-                      delta: {
-                        tool_calls: [{
-                          index: toolIndex,
-                          id: callId,
-                          type: "function",
-                          function: { name: toolName, arguments: "" },
-                        }],
-                      },
-                      logprobs: null,
-                      finish_reason: null,
-                    }],
-                  };
-                  safeEnqueue(`data: ${JSON.stringify(initChunk)}\n\n`);
                 }
               }
 
@@ -1080,10 +1055,31 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
               if (event.type === "content_block_stop") {
                 if (currentToolUse) {
-                  // Emit buffered arguments as a single delta (OpenAI phase 2).
-                  // The initial chunk (with id/name) was already sent at
-                  // content_block_start. This delta only carries the arguments.
                   const completeArgs = currentToolArgBuffer || "{}";
+
+                  // Phase 1: register the tool call (id + name + empty args)
+                  const initChunk: OpenAIStreamChunk = {
+                    id: requestId,
+                    object: "chat.completion.chunk",
+                    created: nowUnix(),
+                    model,
+                    choices: [{
+                      index: 0,
+                      delta: {
+                        tool_calls: [{
+                          index: currentToolUse.index,
+                          id: currentToolUse.id,
+                          type: "function",
+                          function: { name: currentToolUse.name, arguments: "" },
+                        }],
+                      },
+                      logprobs: null,
+                      finish_reason: null,
+                    }],
+                  };
+                  safeEnqueue(`data: ${JSON.stringify(initChunk)}\n\n`);
+
+                  // Phase 2: deliver complete arguments (immediately after)
                   const argChunk: OpenAIStreamChunk = {
                     id: requestId,
                     object: "chat.completion.chunk",
