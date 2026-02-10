@@ -953,7 +953,6 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           }
           controller.close();
         } catch (err) {
-          console.error("[STREAM] error during streaming:", err);
           controller.error(err);
         }
       },

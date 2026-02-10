@@ -16,13 +16,10 @@ export default defineEventHandler(async (event) => {
     };
   }
 
-  console.log("[COMPLETIONS] reading body...");
   let rawBody: unknown;
   try {
     rawBody = await readBody(event);
-    console.log(`[COMPLETIONS] body read OK, size=${JSON.stringify(rawBody).length}`);
-  } catch (err) {
-    console.error("[COMPLETIONS] readBody failed:", err);
+  } catch {
     setResponseStatus(event, 400);
     return {
       error: {
@@ -33,10 +30,8 @@ export default defineEventHandler(async (event) => {
     };
   }
 
-  console.log("[COMPLETIONS] validating...");
   const parsed = chatCompletionRequestSchema.safeParse(rawBody);
   if (!parsed.success) {
-    console.log("[COMPLETIONS] validation failed:", parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "));
     setResponseStatus(event, 400);
     return {
       error: {
@@ -46,13 +41,10 @@ export default defineEventHandler(async (event) => {
       },
     };
   }
-  console.log("[COMPLETIONS] validation OK, calling executeProxyRequest...");
-
   const body = parsed.data as OpenAIChatRequest;
 
   try {
     const result = await executeProxyRequest(body, keyData);
-    console.log(`[COMPLETIONS] executeProxyRequest returned, type=${result.type}`);
 
     if (result.type === "stream" && result.stream) {
       setHeader(event, "Content-Type", "text/event-stream");
@@ -72,7 +64,6 @@ export default defineEventHandler(async (event) => {
 
     return result.data;
   } catch (err) {
-    console.error("[DEBUG /v1/chat/completions] error:", err);
     if (err instanceof OpenAIError) {
       setResponseStatus(event, err.statusCode);
       return err.toResponse();

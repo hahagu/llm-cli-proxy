@@ -22,15 +22,7 @@ export default defineEventHandler(async (event) => {
     };
   }
 
-  console.log(`[AUTH] resolving key for ${path}`);
-  let keyData;
-  try {
-    keyData = await resolveApiKey(token);
-  } catch (err) {
-    console.error(`[AUTH] resolveApiKey failed:`, err);
-    throw err;
-  }
-  console.log(`[AUTH] key resolved: ${keyData ? "found" : "not found"}`);
+  const keyData = await resolveApiKey(token);
   if (!keyData || !keyData.isActive) {
     setResponseStatus(event, 401);
     return {
