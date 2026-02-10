@@ -55,7 +55,7 @@ export default defineEventHandler(async (event) => {
   const openAIRequest = anthropicToOpenAI(anthropicBody);
 
   try {
-    const result = await executeProxyRequest(openAIRequest, keyData);
+    const result = await executeProxyRequest(openAIRequest, keyData, "/v1/messages");
 
     if (result.type === "stream" && result.stream) {
       // Transform OpenAI SSE → Anthropic SSE
