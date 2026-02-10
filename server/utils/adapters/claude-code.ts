@@ -804,9 +804,31 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
       options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, true, thinkingMode, mcpServer as Record<string, unknown> | undefined),
     });
 
+    let streamClosed = false;
+
     return new ReadableStream<string>({
       async start(controller) {
         try {
+          // Safe stream helpers — handle client disconnection gracefully.
+          // When a client (e.g. LobeChat) closes the HTTP connection mid-stream,
+          // the ReadableStream controller becomes closed and further enqueue()
+          // calls throw "Controller is already closed". These wrappers catch
+          // that and set a flag to suppress further writes.
+          function safeEnqueue(data: string) {
+            if (streamClosed) return;
+            try { controller.enqueue(data); } catch { streamClosed = true; }
+          }
+          function safeClose() {
+            if (streamClosed) return;
+            streamClosed = true;
+            try { controller.close(); } catch { /* already closed */ }
+          }
+          function safeError(err: unknown) {
+            if (streamClosed) return;
+            streamClosed = true;
+            try { controller.error(err); } catch { /* already closed */ }
+          }
+
           let sentRole = false;
 
           // --- Thinking tag detection state machine ---
@@ -840,7 +862,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               model,
               choices: [{ index: 0, delta: { reasoning_content: text }, logprobs: null, finish_reason: null }],
             };
-            controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
+            safeEnqueue(`data: ${JSON.stringify(chunk)}\n\n`);
           }
 
           function emitTextDelta(text: string) {
@@ -852,7 +874,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
               model,
               choices: [{ index: 0, delta: { content: text }, logprobs: null, finish_reason: null }],
             };
-            controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
+            safeEnqueue(`data: ${JSON.stringify(chunk)}\n\n`);
           }
 
 
@@ -986,13 +1008,13 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                     choices: [
                       {
                         index: 0,
-                        delta: { role: "assistant", content: null },
+                        delta: { role: "assistant", content: "" },
                         logprobs: null,
                         finish_reason: null,
                       },
                     ],
                   };
-                  controller.enqueue(`data: ${JSON.stringify(chunk)}\n\n`);
+                  safeEnqueue(`data: ${JSON.stringify(chunk)}\n\n`);
                 } else if (!suppressSecondTurn) {
                   // Separator between multi-turn outputs
                   emitTextDelta("\n\n");
@@ -1035,7 +1057,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                       finish_reason: null,
                     }],
                   };
-                  controller.enqueue(`data: ${JSON.stringify(initChunk)}\n\n`);
+                  safeEnqueue(`data: ${JSON.stringify(initChunk)}\n\n`);
 
                   if (process.env.DEBUG_SDK) {
                     console.log("[SDK:tool_use:start]", JSON.stringify({ id: callId, name: toolName, rawId, rawName: block.name, hasId: "id" in block, hasName: "name" in block }));
@@ -1066,7 +1088,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                         finish_reason: null,
                       }],
                     };
-                    controller.enqueue(`data: ${JSON.stringify(argChunk)}\n\n`);
+                    safeEnqueue(`data: ${JSON.stringify(argChunk)}\n\n`);
                   }
                 } else if (delta?.type === "text_delta" && delta.text && !suppressSecondTurn) {
                   feedText(delta.text as string);
@@ -1131,16 +1153,21 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                 (lastUsage.input_tokens ?? 0) + (lastUsage.output_tokens ?? 0),
             };
           }
-          controller.enqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
-          controller.enqueue("data: [DONE]\n\n");
+          safeEnqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
+          safeEnqueue("data: [DONE]\n\n");
           if (process.env.DEBUG_SDK) {
             console.log("[SSE:done]", JSON.stringify({ requestId, stopReason, toolCalls: nativeToolCalls.length }));
           }
-          controller.close();
+          safeClose();
         } catch (err) {
-          console.error("[SSE:error]", err);
-          controller.error(err);
+          if (!streamClosed) console.error("[SSE:error]", err);
+          safeError(err);
         }
+      },
+      cancel() {
+        // Client disconnected — mark stream as closed so the SDK loop
+        // stops trying to enqueue data to the now-dead controller.
+        streamClosed = true;
       },
     });
   }
