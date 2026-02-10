@@ -389,46 +389,37 @@ function translateStopReason(
   }
 }
 
-/** Map OpenAI reasoning_effort to an approximate thinking budget. */
-const REASONING_EFFORT_BUDGETS: Record<string, number> = {
-  minimal: 1024,
-  low: 2048,
-  medium: 4096,
-  high: 8192,
-  xhigh: 16384,
-};
+/** Thinking mode resolved from request parameters. */
+type ThinkingMode = "off" | "forced" | "adaptive";
 
-/** Resolve thinking budget from request (thinking.budget_tokens takes priority, then reasoning_effort). */
-function resolveThinkingBudget(request: OpenAIChatRequest): number | undefined {
-  // Explicit Anthropic-style thinking with budget_tokens takes priority
-  if (
-    request.thinking?.type === "enabled" &&
-    request.thinking.budget_tokens &&
-    request.thinking.budget_tokens > 0
-  ) {
-    return request.thinking.budget_tokens;
-  }
+/** Resolve thinking mode from request parameters. */
+function resolveThinkingMode(request: OpenAIChatRequest): ThinkingMode {
+  // Explicit Anthropic-style thinking
+  if (request.thinking?.type === "enabled") return "forced";
+  if (request.thinking?.type === "adaptive") return "adaptive";
+  if (request.thinking?.type === "disabled") return "off";
 
-  // If thinking is present but type is not "enabled", don't enable thinking
-  if (request.thinking && request.thinking.type && request.thinking.type !== "enabled") {
-    return undefined;
-  }
+  // OpenAI-style reasoning_effort
+  if (request.reasoning_effort && request.reasoning_effort !== "none") return "forced";
 
-  // Fall back to OpenAI-style reasoning_effort
-  if (request.reasoning_effort && request.reasoning_effort !== "none") {
-    return REASONING_EFFORT_BUDGETS[request.reasoning_effort] ?? 4096;
-  }
-
-  return undefined;
+  return "off";
 }
 
-/** Prompt suffix that instructs the model to think out loud in tags. */
-const THINKING_PROMPT =
+/** Forced thinking prompt — model MUST think. */
+const THINKING_PROMPT_FORCED =
   "\n\nIMPORTANT: Before answering, you MUST think through your reasoning step-by-step " +
   "inside <thinking>...</thinking> XML tags. Place ALL of your internal reasoning, analysis, " +
   "and thought process inside these tags. Then provide your final answer AFTER the closing " +
   "</thinking> tag. The thinking section will be shown separately to the user as your " +
   "reasoning process. Always include the thinking tags, even for simple questions.";
+
+/** Adaptive thinking prompt — model decides whether to think. */
+const THINKING_PROMPT_ADAPTIVE =
+  "\n\nFor complex questions that require multi-step reasoning, analysis, or careful thought, " +
+  "you may optionally think through your reasoning inside <thinking>...</thinking> XML tags " +
+  "before providing your answer. Place your internal reasoning inside these tags, then provide " +
+  "your final answer AFTER the closing </thinking> tag. The thinking section will be shown " +
+  "separately to the user. For simple questions, respond directly without thinking tags.";
 
 /** Extract thinking content from text that uses <thinking>...</thinking> tags. */
 function extractThinkingFromText(text: string): {
@@ -451,7 +442,7 @@ function buildSdkOptions(
   promptSuffix: string,
   oauthToken: string,
   streaming: boolean,
-  wantsThinking: boolean,
+  thinkingMode: ThinkingMode,
 ) {
   const options: Record<string, unknown> = {
     model: request.model,
@@ -465,7 +456,9 @@ function buildSdkOptions(
   // We neutralize that identity first, then append the caller's prompt
   // (or a plain default) so it takes full precedence.
   const base = systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
-  const thinkingSuffix = wantsThinking ? THINKING_PROMPT : "";
+  const thinkingSuffix = thinkingMode === "forced" ? THINKING_PROMPT_FORCED
+    : thinkingMode === "adaptive" ? THINKING_PROMPT_ADAPTIVE
+    : "";
   options.systemPrompt = SYSTEM_PROMPT_NEUTRALIZER + base + promptSuffix + thinkingSuffix;
 
   if (streaming) {
@@ -500,11 +493,12 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     let resultText = "";
     let inputTokens = 0;
     let outputTokens = 0;
-    const wantsThinking = resolveThinkingBudget(request) !== undefined;
+    const thinkingMode = resolveThinkingMode(request);
+    const wantsThinking = thinkingMode !== "off";
 
     for await (const message of query({
       prompt: prompt as string,
-      options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, false, wantsThinking),
+      options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, false, thinkingMode),
     })) {
       if (message.type === "assistant") {
         for (const block of message.message.content) {
@@ -615,11 +609,12 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     const model = request.model;
     const includeUsage = !!request.stream_options?.include_usage;
 
-    const wantsThinking = resolveThinkingBudget(request) !== undefined;
+    const thinkingMode = resolveThinkingMode(request);
+    const wantsThinking = thinkingMode !== "off";
 
     const sdkQuery = query({
       prompt: prompt as string,
-      options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, true, wantsThinking),
+      options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, true, thinkingMode),
     });
 
     return new ReadableStream<string>({
