@@ -41,5 +41,14 @@ export default defineNuxtConfig({
 
   nitro: {
     preset: "bun",
+    // The default node-externals plugin has an uncached module resolution
+    // algorithm that is the main bottleneck of the Nitro build step.
+    // The legacy algorithm caches resolutions and is ~3x faster.
+    // https://github.com/nitrojs/nitro/issues/2369
+    experimental: {
+      legacyExternals: true,
+    },
+    minify: false,
+    sourceMap: false,
   },
 });
