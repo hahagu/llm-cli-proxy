@@ -490,8 +490,6 @@ function buildSdkOptions(
     // `allowedTools: []` separately means no tools are auto-approved.
     tools: [],
     allowedTools: [],
-    permissionMode: "bypassPermissions",
-    allowDangerouslySkipPermissions: true,
     settingSources: [],
     env: makeEnv(oauthToken),
   };
