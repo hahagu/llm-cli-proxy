@@ -311,12 +311,9 @@ async function buildMcpServer(tools: OpenAITool[]) {
     const shape = jsonSchemaToZodShape(rawParams);
 
     if (process.env.DEBUG_SDK) {
-      const props = rawParams?.properties as Record<string, unknown> | undefined;
       console.log("[MCP:tool]", JSON.stringify({
         name: t.function.name,
-        schemaKeys: props ? Object.keys(props) : [],
         shapeKeys: Object.keys(shape),
-        rawParams: rawParams,
       }));
     }
 
@@ -458,16 +455,8 @@ function convertMessages(request: OpenAIChatRequest): {
 }
 
 function makeEnv(oauthToken: string): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined) {
-      env[key] = value;
-    }
-  }
-  // Set OAuth token for the SDK subprocess
-  env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
-  // Prevent the SDK from using any ambient API key
-  delete (env as Record<string, string | undefined>).ANTHROPIC_API_KEY;
+  const env = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: oauthToken } as Record<string, string>;
+  delete env.ANTHROPIC_API_KEY;
   return env;
 }
 
@@ -612,15 +601,7 @@ function buildSdkOptions(
   const effort = resolveThinkingEffort(request);
   const thinkingSuffix = buildThinkingPrompt(thinkingMode, effort);
 
-  // When tools are available, nudge the model to provide complete arguments
-  // matching the tool schema. Without this, the model sometimes calls tools
-  // with empty {} arguments (especially for complex nested schemas).
-  const toolHint = mcpServer
-    ? "\n\nWhen calling tools, you must provide complete arguments that strictly " +
-      "match each tool's parameter schema. Never call a tool with empty or partial arguments."
-    : "";
-
-  options.systemPrompt = SYSTEM_PROMPT_NEUTRALIZER + base + promptSuffix + toolHint + thinkingSuffix;
+  options.systemPrompt = SYSTEM_PROMPT_NEUTRALIZER + base + promptSuffix + thinkingSuffix;
 
   if (streaming) {
     options.includePartialMessages = true;
@@ -846,14 +827,14 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           // inline and emits thinking content as reasoning_content in real-time.
           const OPEN_TAG = "<thinking>";
           const CLOSE_TAG = "</thinking>";
-          type ThinkingState = "detect_start" | "in_thinking" | "detect_end" | "in_content" | "passthrough";
+          type ThinkingState = "detect_start" | "in_thinking" | "in_content" | "passthrough";
           let thinkingState: ThinkingState = wantsThinking ? "detect_start" : "passthrough";
           let tagBuffer = "";
 
           // --- Native tool_use tracking ---
-          // Streams tool_use blocks to the client in real-time as OpenAI-format
-          // tool_calls deltas, matching the incremental streaming format that
-          // clients like LobeChat expect.
+          // Buffers tool_use arguments and emits the complete tool_call in a
+          // single chunk at content_block_stop. SSE keepalive comments are sent
+          // during buffering to prevent connection timeouts.
           const nativeToolCalls: Array<{ id: string; name: string }> = [];
           let currentToolUse: { id: string; name: string; index: number } | null = null;
           let currentToolArgBuffer = ""; // accumulated argument JSON for buffered emission
@@ -1130,9 +1111,6 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
           // All done — flush buffers and emit final chunks.
           if (!suppressSecondTurn) flushPending();
-
-          // Tool calls were already streamed incrementally above.
-          // Just determine the finish reason.
           const stopReason = nativeToolCalls.length > 0 ? "tool_calls" : "stop";
 
           if (process.env.DEBUG_SDK) {
