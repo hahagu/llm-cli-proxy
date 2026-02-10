@@ -42,7 +42,6 @@ export default defineEventHandler(async (event) => {
     };
   }
   const body = parsed.data as OpenAIChatRequest;
-  console.log("[DEBUG] Incoming request:", { model: body.model, thinking: body.thinking, reasoning_effort: body.reasoning_effort, stream: body.stream });
 
   try {
     const result = await executeProxyRequest(body, keyData);

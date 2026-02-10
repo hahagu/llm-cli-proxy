@@ -392,6 +392,9 @@ function translateStopReason(
 /** Thinking mode resolved from request parameters. */
 type ThinkingMode = "off" | "forced" | "adaptive";
 
+/** Effort level for thinking depth. */
+type ThinkingEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+
 /** Resolve thinking mode from request parameters. */
 function resolveThinkingMode(request: OpenAIChatRequest): ThinkingMode {
   // Explicit Anthropic-style thinking
@@ -405,21 +408,67 @@ function resolveThinkingMode(request: OpenAIChatRequest): ThinkingMode {
   return "off";
 }
 
-/** Forced thinking prompt — model MUST think. */
-const THINKING_PROMPT_FORCED =
-  "\n\nIMPORTANT: Before answering, you MUST think through your reasoning step-by-step " +
-  "inside <thinking>...</thinking> XML tags. Place ALL of your internal reasoning, analysis, " +
-  "and thought process inside these tags. Then provide your final answer AFTER the closing " +
-  "</thinking> tag. The thinking section will be shown separately to the user as your " +
-  "reasoning process. Always include the thinking tags, even for simple questions.";
+/** Resolve effort level from request. */
+function resolveThinkingEffort(request: OpenAIChatRequest): ThinkingEffort {
+  if (request.reasoning_effort && request.reasoning_effort !== "none") {
+    return request.reasoning_effort as ThinkingEffort;
+  }
+  return "medium";
+}
 
-/** Adaptive thinking prompt — model decides whether to think. */
-const THINKING_PROMPT_ADAPTIVE =
-  "\n\nFor complex questions that require multi-step reasoning, analysis, or careful thought, " +
-  "you may optionally think through your reasoning inside <thinking>...</thinking> XML tags " +
-  "before providing your answer. Place your internal reasoning inside these tags, then provide " +
-  "your final answer AFTER the closing </thinking> tag. The thinking section will be shown " +
-  "separately to the user. For simple questions, respond directly without thinking tags.";
+/** Effort-specific depth instructions. */
+const EFFORT_INSTRUCTIONS: Record<ThinkingEffort, string> = {
+  minimal:
+    "Keep your thinking brief — a few sentences identifying the key point and your approach.",
+  low:
+    "Think briefly — outline your main reasoning steps and key considerations in a short paragraph.",
+  medium:
+    "Think through the problem methodically. Break it into steps, consider different angles, " +
+    "and show your reasoning chain before reaching a conclusion.",
+  high:
+    "Think deeply and thoroughly. Explore multiple perspectives, consider edge cases, weigh " +
+    "trade-offs, challenge your initial assumptions, and build a detailed chain of reasoning. " +
+    "Your thinking should be substantially longer than your final answer.",
+  xhigh:
+    "Think with maximum depth and rigor. Perform exhaustive analysis: explore all relevant angles, " +
+    "consider counterarguments, examine edge cases, draw connections between concepts, question " +
+    "assumptions, and reason through each step in detail. Produce a comprehensive chain of thought " +
+    "that demonstrates thorough deliberation. Your thinking should be significantly longer than your answer.",
+};
+
+/** Build the thinking prompt suffix based on mode and effort. */
+function buildThinkingPrompt(mode: ThinkingMode, effort: ThinkingEffort): string {
+  if (mode === "off") return "";
+
+  const depthInstruction = EFFORT_INSTRUCTIONS[effort];
+
+  const coreInstruction =
+    "Your thinking must focus on the SUBJECT MATTER of the user's question — " +
+    "analyze the topic, reason about concepts, work through logic, and develop your answer. " +
+    "Do NOT use the thinking section to discuss tool availability or your own capabilities.";
+
+  if (mode === "adaptive") {
+    return (
+      "\n\nFor questions that benefit from careful reasoning, you may think through your " +
+      "response inside <thinking>...</thinking> XML tags before answering. " +
+      depthInstruction + " " + coreInstruction + " " +
+      "Place your reasoning inside <thinking> tags, then provide your final answer AFTER the " +
+      "closing </thinking> tag. The thinking section is shown separately to the user as your " +
+      "reasoning process. For truly trivial questions, you may respond directly without thinking tags."
+    );
+  }
+
+  // forced mode
+  return (
+    "\n\nIMPORTANT: Before answering, you MUST reason through the problem step-by-step " +
+    "inside <thinking>...</thinking> XML tags. " +
+    depthInstruction + " " + coreInstruction + " " +
+    "Place ALL of your internal reasoning, analysis, and thought process inside these tags. " +
+    "Then provide your final answer AFTER the closing </thinking> tag. The thinking section " +
+    "is shown separately to the user as your reasoning process. " +
+    "Always include the thinking tags, even for simple questions."
+  );
+}
 
 /** Extract thinking content from text that uses <thinking>...</thinking> tags. */
 function extractThinkingFromText(text: string): {
@@ -456,9 +505,8 @@ function buildSdkOptions(
   // We neutralize that identity first, then append the caller's prompt
   // (or a plain default) so it takes full precedence.
   const base = systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
-  const thinkingSuffix = thinkingMode === "forced" ? THINKING_PROMPT_FORCED
-    : thinkingMode === "adaptive" ? THINKING_PROMPT_ADAPTIVE
-    : "";
+  const effort = resolveThinkingEffort(request);
+  const thinkingSuffix = buildThinkingPrompt(thinkingMode, effort);
   options.systemPrompt = SYSTEM_PROMPT_NEUTRALIZER + base + promptSuffix + thinkingSuffix;
 
   if (streaming) {
