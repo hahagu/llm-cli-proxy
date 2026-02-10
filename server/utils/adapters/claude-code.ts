@@ -217,36 +217,63 @@ function stripMcpPrefix(name: string): string {
 }
 
 /**
- * Convert a JSON Schema type string to a basic Zod type.
- * Only maps top-level properties — enough for the model to see
- * parameter names and basic types.
+ * Recursively convert a JSON Schema property to a Zod type.
+ * Handles nested objects, arrays with typed items, enums, and
+ * all primitive types so the model sees the full parameter structure.
  */
 function jsonSchemaPropertyToZod(
   prop: Record<string, unknown>,
 ): z.ZodTypeAny {
   const desc = prop.description as string | undefined;
   let zodType: z.ZodTypeAny;
+
+  // Handle enum values (string enums)
+  if (Array.isArray(prop.enum) && prop.enum.length > 0) {
+    const values = prop.enum as [string, ...string[]];
+    zodType = z.enum(values);
+    return desc ? zodType.describe(desc) : zodType;
+  }
+
   switch (prop.type) {
     case "string":
-      zodType = desc ? z.string().describe(desc) : z.string();
+      zodType = z.string();
       break;
     case "number":
     case "integer":
-      zodType = desc ? z.number().describe(desc) : z.number();
+      zodType = z.number();
       break;
     case "boolean":
-      zodType = desc ? z.boolean().describe(desc) : z.boolean();
+      zodType = z.boolean();
       break;
-    case "array":
-      zodType = desc ? z.array(z.any()).describe(desc) : z.array(z.any());
+    case "array": {
+      // Recursively convert items schema so nested structure is preserved
+      const items = prop.items as Record<string, unknown> | undefined;
+      const itemType = items ? jsonSchemaPropertyToZod(items) : z.any();
+      zodType = z.array(itemType);
       break;
-    case "object":
-      zodType = desc ? z.record(z.any()).describe(desc) : z.record(z.any());
+    }
+    case "object": {
+      // Recursively convert nested object properties
+      const properties = prop.properties as
+        | Record<string, Record<string, unknown>>
+        | undefined;
+      if (properties) {
+        const required = new Set((prop.required as string[]) ?? []);
+        const shape: Record<string, z.ZodTypeAny> = {};
+        for (const [name, propDef] of Object.entries(properties)) {
+          const propZod = jsonSchemaPropertyToZod(propDef);
+          shape[name] = required.has(name) ? propZod : propZod.optional();
+        }
+        zodType = z.object(shape);
+      } else {
+        zodType = z.record(z.any());
+      }
       break;
+    }
     default:
-      zodType = desc ? z.any().describe(desc) : z.any();
+      zodType = z.any();
   }
-  return zodType;
+  return desc ? zodType.describe(desc) : zodType;
 }
 
 /**
