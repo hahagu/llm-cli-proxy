@@ -123,6 +123,7 @@ import {
   MessageSquare,
   LayoutDashboard,
   MessageCircle,
+  ScrollText,
   Sun,
   Moon,
 } from "lucide-vue-next";
@@ -140,6 +141,7 @@ const navItems = [
     label: "System Prompts",
     icon: MessageSquare,
   },
+  { to: "/dashboard/logs", label: "Logs", icon: ScrollText },
   { to: "/dashboard/chat", label: "Test Chat", icon: MessageCircle },
 ];
 
