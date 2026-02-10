@@ -137,7 +137,7 @@ function convertMessagesMultimodal(request: OpenAIChatRequest): {
           const calls = msg.tool_calls
             .map(
               (tc) =>
-                `[Tool Call: ${tc.function.name}(${tc.function.arguments})]`,
+                `<tool_call name="${tc.function.name}" id="${tc.id}">\n${tc.function.arguments}\n</tool_call>`,
             )
             .join("\n");
           content = content ? `${content}\n${calls}` : calls;
@@ -146,7 +146,9 @@ function convertMessagesMultimodal(request: OpenAIChatRequest): {
         break;
       }
       case "tool":
-        historyParts.push(`Tool Result (${msg.tool_call_id}): ${text}`);
+        historyParts.push(
+          `<tool_result id="${msg.tool_call_id}">\n${text}\n</tool_result>`,
+        );
         break;
     }
   }
@@ -154,7 +156,7 @@ function convertMessagesMultimodal(request: OpenAIChatRequest): {
   // Fold history into the system prompt so it's not lost
   if (historyParts.length > 0) {
     const history =
-      "Conversation history:\n" + historyParts.join("\n\n");
+      "<conversation_history>\n" + historyParts.join("\n\n") + "\n</conversation_history>";
     systemPrompt = systemPrompt
       ? `${systemPrompt}\n\n${history}`
       : history;
@@ -315,14 +317,52 @@ function validateAndEnhanceRequest(request: OpenAIChatRequest): {
   return { promptSuffix, hasTools };
 }
 
+/**
+ * Convert OpenAI messages into a systemPrompt + prompt pair.
+ *
+ * Conversation history is folded into the system prompt so the SDK's
+ * single-turn `prompt` parameter only carries the current user input.
+ * Tool calls and results use XML tags (<tool_call>, <tool_result>) that
+ * mirror the native structure, helping the model maintain tool-use context
+ * across follow-up turns.
+ */
 function convertMessages(request: OpenAIChatRequest): {
   systemPrompt: string | undefined;
   prompt: string;
 } {
   let systemPrompt = "";
-  const parts: string[] = [];
+  const msgs = request.messages;
 
-  for (const msg of request.messages) {
+  // --- Fast path: single user message (no history to fold) ---
+  const nonSystem = msgs.filter((m) => m.role !== "system");
+  if (nonSystem.length === 1 && nonSystem[0]?.role === "user") {
+    for (const m of msgs) {
+      if (m.role === "system") {
+        const t = extractTextContent(m.content);
+        systemPrompt = systemPrompt ? `${systemPrompt}\n${t}` : t;
+      }
+    }
+    return {
+      systemPrompt: systemPrompt || undefined,
+      prompt: extractTextContent(nonSystem[0].content),
+    };
+  }
+
+  // --- Multi-turn conversation ---
+  // If the conversation ends with a user message, that becomes the prompt
+  // and everything before it is folded into the system prompt as history.
+  // If it ends with tool results (or assistant), ALL messages become history
+  // and we use a continuation prompt.
+  const lastMsg = msgs[msgs.length - 1];
+  const endsWithUserMsg = lastMsg?.role === "user";
+
+  // Index of the message that will become the SDK prompt (-1 = use continuation)
+  const promptMsgIdx = endsWithUserMsg ? msgs.length - 1 : -1;
+
+  const historyParts: string[] = [];
+
+  for (let i = 0; i < msgs.length; i++) {
+    const msg = msgs[i]!;
     const text = extractTextContent(msg.content);
 
     switch (msg.role) {
@@ -330,7 +370,10 @@ function convertMessages(request: OpenAIChatRequest): {
         systemPrompt = systemPrompt ? `${systemPrompt}\n${text}` : text;
         break;
       case "user":
-        parts.push(`User: ${text}`);
+        // Skip the message that will become the prompt
+        if (i !== promptMsgIdx) {
+          historyParts.push(`User: ${text}`);
+        }
         break;
       case "assistant": {
         let content = text;
@@ -338,33 +381,42 @@ function convertMessages(request: OpenAIChatRequest): {
           const calls = msg.tool_calls
             .map(
               (tc) =>
-                `[Tool Call: ${tc.function.name}(${tc.function.arguments})]`,
+                `<tool_call name="${tc.function.name}" id="${tc.id}">\n${tc.function.arguments}\n</tool_call>`,
             )
             .join("\n");
           content = content ? `${content}\n${calls}` : calls;
         }
-        parts.push(`Assistant: ${content}`);
+        historyParts.push(`Assistant: ${content}`);
         break;
       }
       case "tool":
-        parts.push(`Tool Result (${msg.tool_call_id}): ${text}`);
+        historyParts.push(
+          `<tool_result id="${msg.tool_call_id}">\n${text}\n</tool_result>`,
+        );
         break;
     }
   }
 
-  // Single user message: send directly without "User:" prefix
-  const nonSystem = request.messages.filter((m) => m.role !== "system");
-  if (nonSystem.length === 1 && nonSystem[0]?.role === "user") {
-    const directText = extractTextContent(nonSystem[0].content);
-    return {
-      systemPrompt: systemPrompt || undefined,
-      prompt: directText,
-    };
+  // Fold history into the system prompt
+  if (historyParts.length > 0) {
+    const history =
+      "<conversation_history>\n" +
+      historyParts.join("\n\n") +
+      "\n</conversation_history>";
+    systemPrompt = systemPrompt
+      ? `${systemPrompt}\n\n${history}`
+      : history;
   }
+
+  // Determine the user-facing prompt
+  const prompt =
+    promptMsgIdx >= 0
+      ? extractTextContent(msgs[promptMsgIdx]!.content)
+      : "Continue with your task based on the conversation and tool results above.";
 
   return {
     systemPrompt: systemPrompt || undefined,
-    prompt: parts.join("\n\n"),
+    prompt,
   };
 }
 
