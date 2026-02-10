@@ -206,36 +206,54 @@ function createMultimodalPrompt(
 
 // --- Prompt-based tool calling ---
 
-/** Name of the internal meta-tool that lets the model discover parameter schemas on demand. */
-const META_TOOL_NAME = "get_tool_parameters";
+/** Build a compact parameter signature like (query: string, limit?: number). */
+function buildCompactParams(params: Record<string, unknown> | undefined): string {
+  if (!params) return "()";
+  const props = params.properties as Record<string, { type?: string }> | undefined;
+  if (!props) return "()";
+  const required = new Set((params.required as string[]) ?? []);
+  const parts: string[] = [];
+  for (const [name, schema] of Object.entries(props)) {
+    const type = schema.type ?? "any";
+    parts.push(required.has(name) ? `${name}: ${type}` : `${name}?: ${type}`);
+  }
+  return `(${parts.join(", ")})`;
+}
 
 /** Build a system prompt suffix describing available tools. */
 function buildToolPrompt(tools: OpenAITool[], toolChoice: OpenAIChatRequest["tool_choice"]): string {
   if (toolChoice === "none" || !tools.length) return "";
 
-  // Only include name + description — omit full JSON schemas to keep the
-  // prompt small.  The model can call get_tool_parameters to discover schemas.
-  const toolDescriptions = tools.map((t) => {
-    const desc = t.function.description ? `: ${t.function.description}` : "";
-    return `- ${t.function.name}${desc}`;
+  const toolList = tools.map((t) => {
+    const params = buildCompactParams(t.function.parameters as Record<string, unknown> | undefined);
+    const desc = t.function.description ? ` — ${t.function.description}` : "";
+    return `- ${t.function.name}${params}${desc}`;
   }).join("\n");
 
   let instruction = `
 
-You have access to the following tools.
-When you decide to call one or more tools, you MUST respond with ONLY a JSON code block in exactly this format (no other text before or after):
+## TOOL CALLING PROTOCOL
+
+You have external tools. To use a tool, output a fenced JSON block in EXACTLY this format:
 
 \`\`\`json
-{"tool_calls":[{"function":{"name":"function_name","arguments":"{...}"}}]}
+{"tool_calls":[{"function":{"name":"<tool_name>","arguments":"{\\"param\\":\\"value\\"}"}}]}
 \`\`\`
 
-The "arguments" value must be a JSON-encoded string of the function parameters.
+Rules:
+- "arguments" must be a JSON-encoded STRING (with escaped quotes), not a raw object
+- You may include reasoning text before the JSON block
+- Do NOT just describe or narrate what you would do — actually call the tool using the format above
+- If a task requires using a tool, you MUST output the JSON block
 
-If you are unsure about a tool's parameters, call ${META_TOOL_NAME} first:
-- ${META_TOOL_NAME}: Returns the parameter schema for a given tool. Arguments: {"tool_name":"<name>"}
+Example — calling a tool named "search" with a query parameter:
+
+\`\`\`json
+{"tool_calls":[{"function":{"name":"search","arguments":"{\\"query\\":\\"example\\"}"}}]}
+\`\`\`
 
 Available tools:
-${toolDescriptions}`;
+${toolList}`;
 
   if (toolChoice === "required") {
     instruction += "\n\nYou MUST call at least one tool in your response.";
@@ -244,38 +262,6 @@ ${toolDescriptions}`;
   }
 
   return instruction;
-}
-
-/**
- * Resolve any get_tool_parameters calls by looking up schemas from the
- * request's tool definitions.  Returns null if there are no meta-tool calls;
- * otherwise returns the resolved results keyed by tool name.
- */
-function resolveMetaToolCalls(
-  toolCalls: OpenAIToolCall[],
-  tools: OpenAITool[],
-): { resolved: Map<string, string>; remaining: OpenAIToolCall[] } {
-  const resolved = new Map<string, string>();
-  const remaining: OpenAIToolCall[] = [];
-  for (const tc of toolCalls) {
-    if (tc.function.name === META_TOOL_NAME) {
-      try {
-        const args = JSON.parse(tc.function.arguments) as { tool_name?: string };
-        const name = args.tool_name ?? "";
-        const tool = tools.find((t) => t.function.name === name);
-        if (tool) {
-          resolved.set(name, JSON.stringify(tool.function.parameters ?? {}));
-        } else {
-          resolved.set(name, `Error: unknown tool "${name}"`);
-        }
-      } catch {
-        resolved.set("?", "Error: invalid arguments for get_tool_parameters");
-      }
-    } else {
-      remaining.push(tc);
-    }
-  }
-  return { resolved, remaining };
 }
 
 /** Try to parse tool calls from the model's text response. */
@@ -619,28 +605,6 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     if (hasTools && cleanedText) {
       const parsed = parseToolCallsFromText(cleanedText);
       if (parsed && parsed.toolCalls.length > 0) {
-        // Resolve get_tool_parameters internally — re-query with schemas injected
-        const { resolved, remaining } = resolveMetaToolCalls(parsed.toolCalls, request.tools!);
-        if (resolved.size > 0) {
-          // Build a follow-up prompt with the parameter schemas
-          const schemas = [...resolved.entries()]
-            .map(([name, schema]) => `Parameters for ${name}:\n${schema}`)
-            .join("\n\n");
-          const followUp = `Here are the requested tool parameter schemas:\n\n${schemas}\n\nNow call the appropriate tool(s) with the correct parameters.`;
-
-          // Append assistant response + tool results + follow-up to messages
-          const extendedRequest: OpenAIChatRequest = {
-            ...request,
-            messages: [
-              ...request.messages,
-              { role: "assistant" as const, content: cleanedText },
-              { role: "user" as const, content: followUp },
-            ],
-          };
-          // Recurse (max 1 level deep since the follow-up won't hit get_tool_parameters again)
-          return this.complete(extendedRequest, providerApiKey);
-        }
-
         return {
           id: requestId,
           object: "chat.completion",
@@ -653,7 +617,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
                 role: "assistant",
                 content: parsed.textContent || null,
                 ...(thinkingText ? { reasoning_content: thinkingText } : {}),
-                tool_calls: remaining.length > 0 ? remaining : parsed.toolCalls,
+                tool_calls: parsed.toolCalls,
               },
               finish_reason: "tool_calls",
             },
@@ -1048,76 +1012,29 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
           // Emit any prompt-based tool_calls detected in the text.
           if (detectedToolCalls && detectedToolCalls.length > 0) {
-            // Resolve get_tool_parameters internally — re-query with schemas
-            if (hasTools) {
-              const { resolved, remaining } = resolveMetaToolCalls(detectedToolCalls, request.tools!);
-              if (resolved.size > 0) {
-                const schemas = [...resolved.entries()]
-                  .map(([name, schema]) => `Parameters for ${name}:\n${schema}`)
-                  .join("\n\n");
-                const followUp = `Here are the requested tool parameter schemas:\n\n${schemas}\n\nNow call the appropriate tool(s) with the correct parameters.`;
-                // Stream a follow-up query with the schemas injected
-                const followUpQuery = query({
-                  prompt: followUp,
-                  options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, true, thinkingMode),
-                });
-                // Reset tool detection state for the follow-up
-                detectedToolCalls = null;
-                pendingText = "";
-                inToolCallBlock = false;
-
-                for await (const msg of followUpQuery) {
-                  if (msg.type === "stream_event") {
-                    const ev = msg.event as Record<string, unknown>;
-                    if (ev.type === "content_block_delta") {
-                      const delta = ev.delta as Record<string, unknown>;
-                      if (delta?.type === "text_delta" && delta.text) {
-                        feedText(delta.text as string);
-                      }
-                    }
-                    if (ev.type === "message_delta") {
-                      flushPending();
-                      lastUsage = (ev.usage as Record<string, number> | undefined) ?? lastUsage;
-                    }
-                  }
-                }
-                flushPending();
-                // Re-check for tool calls from the follow-up
-                if (detectedToolCalls) {
-                  // Filter out any lingering meta-tool calls
-                  const { remaining: finalCalls } = resolveMetaToolCalls(detectedToolCalls, request.tools!);
-                  detectedToolCalls = finalCalls.length > 0 ? finalCalls : null;
-                }
-              } else {
-                detectedToolCalls = remaining.length > 0 ? remaining : detectedToolCalls;
-              }
+            for (let i = 0; i < detectedToolCalls.length; i++) {
+              const tc = detectedToolCalls[i]!;
+              const toolChunk: OpenAIStreamChunk = {
+                id: requestId,
+                object: "chat.completion.chunk",
+                created: nowUnix(),
+                model,
+                choices: [{
+                  index: 0,
+                  delta: {
+                    tool_calls: [{
+                      index: i,
+                      id: tc.id,
+                      type: "function",
+                      function: { name: tc.function.name, arguments: tc.function.arguments },
+                    }],
+                  },
+                  finish_reason: null,
+                }],
+              };
+              controller.enqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
             }
-
-            if (detectedToolCalls && detectedToolCalls.length > 0) {
-              for (let i = 0; i < detectedToolCalls.length; i++) {
-                const tc = detectedToolCalls[i]!;
-                const toolChunk: OpenAIStreamChunk = {
-                  id: requestId,
-                  object: "chat.completion.chunk",
-                  created: nowUnix(),
-                  model,
-                  choices: [{
-                    index: 0,
-                    delta: {
-                      tool_calls: [{
-                        index: i,
-                        id: tc.id,
-                        type: "function",
-                        function: { name: tc.function.name, arguments: tc.function.arguments },
-                      }],
-                    },
-                    finish_reason: null,
-                  }],
-                };
-                controller.enqueue(`data: ${JSON.stringify(toolChunk)}\n\n`);
-              }
-              stopReason = "tool_calls";
-            }
+            stopReason = "tool_calls";
           }
 
           const finishChunk: OpenAIStreamChunk = {
