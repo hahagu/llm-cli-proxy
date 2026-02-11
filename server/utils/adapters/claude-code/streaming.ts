@@ -395,13 +395,30 @@ export async function createStream(
           //     never received input_json_delta events ---
           if (message.type === "assistant") {
             const blocks = ((message as any).message?.content ?? []) as Array<Record<string, unknown>>;
+            if (process.env.DEBUG_SDK) {
+              const toolUseBlocks = blocks.filter((b) => b.type === "tool_use");
+              console.log("[SDK:assistant:backfill-check]", JSON.stringify({
+                totalBlocks: blocks.length,
+                toolUseBlocks: toolUseBlocks.length,
+                trackedToolCalls: nativeToolCalls.length,
+                withArgs: [...toolCallsWithArgs],
+                toolUseIds: toolUseBlocks.map((b) => b.id),
+                trackedRawIds: nativeToolCalls.map((t) => t.rawId),
+                toolUseInputKeys: toolUseBlocks.map((b) => b.input ? Object.keys(b.input as object) : null),
+              }));
+            }
             for (const block of blocks) {
               if (block.type !== "tool_use") continue;
               const rawId = block.id as string;
               if (toolCallsWithArgs.has(rawId)) continue;
               // Find matching tracked tool call
               const tc = nativeToolCalls.find((t) => t.rawId === rawId);
-              if (!tc) continue;
+              if (!tc) {
+                if (process.env.DEBUG_SDK) {
+                  console.log("[SDK:assistant:no-match]", JSON.stringify({ rawId, trackedRawIds: nativeToolCalls.map((t) => t.rawId) }));
+                }
+                continue;
+              }
               const argsStr = JSON.stringify(block.input ?? {});
               const argChunk: OpenAIStreamChunk = {
                 id: requestId,
