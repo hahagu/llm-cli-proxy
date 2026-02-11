@@ -6,7 +6,7 @@
  *
  * - Text delta streaming (including thinking tag detection)
  * - Two-phase tool_call emission (Phase 1: id/name, Phase 2: args)
- * - Deferred tool_call init (sent with first arg fragment)
+ * - Standard OpenAI tool_call streaming (init chunk + arg fragments)
  * - Usage reporting and graceful client disconnection
  */
 
@@ -108,7 +108,7 @@ export async function createStream(
 
         // --- Native tool_use tracking ---
         const nativeToolCalls: Array<{ id: string; name: string }> = [];
-        let currentToolUse: { id: string; name: string; index: number; sentInit: boolean } | null = null;
+        let currentToolUse: { id: string; name: string; index: number } | null = null;
 
         function emitThinkingDelta(text: string) {
           if (!text) return;
@@ -268,7 +268,29 @@ export async function createStream(
                   : rawId || `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
                 const toolName = stripMcpPrefix((block.name as string) ?? "");
                 const toolIndex = nativeToolCalls.length;
-                currentToolUse = { id: callId, name: toolName, index: toolIndex, sentInit: false };
+                currentToolUse = { id: callId, name: toolName, index: toolIndex };
+
+                // Standard OpenAI init chunk: id/type/name + arguments: ""
+                const initChunk: OpenAIStreamChunk = {
+                  id: requestId,
+                  object: "chat.completion.chunk",
+                  created: nowUnix(),
+                  model,
+                  choices: [{
+                    index: 0,
+                    delta: {
+                      tool_calls: [{
+                        index: toolIndex,
+                        id: callId,
+                        type: "function",
+                        function: { name: toolName, arguments: "" },
+                      }],
+                    },
+                    logprobs: null,
+                    finish_reason: null,
+                  }],
+                };
+                safeEnqueue(`data: ${JSON.stringify(initChunk)}\n\n`);
 
                 if (process.env.DEBUG_SDK) {
                   console.log("[SDK:tool_use:start]", JSON.stringify({ id: callId, name: toolName, rawId, rawName: block.name }));
@@ -281,21 +303,6 @@ export async function createStream(
               const delta = event.delta as Record<string, unknown>;
               if (delta?.type === "input_json_delta" && currentToolUse) {
                 const fragment = (delta.partial_json as string) ?? "";
-
-                // First fragment: send init info (id/type/name) together
-                // with the argument data so LobeChat never sees a tool
-                // call header without arguments.
-                const toolCall: Record<string, unknown> = {
-                  index: currentToolUse.index,
-                  function: { arguments: fragment },
-                };
-                if (!currentToolUse.sentInit) {
-                  currentToolUse.sentInit = true;
-                  toolCall.id = currentToolUse.id;
-                  toolCall.type = "function";
-                  (toolCall.function as Record<string, unknown>).name = currentToolUse.name;
-                }
-
                 const argChunk: OpenAIStreamChunk = {
                   id: requestId,
                   object: "chat.completion.chunk",
@@ -303,7 +310,12 @@ export async function createStream(
                   model,
                   choices: [{
                     index: 0,
-                    delta: { tool_calls: [toolCall] },
+                    delta: {
+                      tool_calls: [{
+                        index: currentToolUse.index,
+                        function: { arguments: fragment },
+                      }],
+                    },
                     logprobs: null,
                     finish_reason: null,
                   }],
@@ -348,10 +360,8 @@ export async function createStream(
         }
 
         // All done — flush buffers and emit final chunks.
-        // Always use "stop" — the client sees tool_calls in the deltas
-        // and handles them without needing finish_reason "tool_calls".
         flushPending();
-        const stopReason = "stop";
+        const stopReason = nativeToolCalls.length > 0 ? "tool_calls" : "stop";
 
         if (process.env.DEBUG_SDK) {
           console.log("[SDK:emit]", JSON.stringify({ nativeToolCalls: nativeToolCalls.length, toolNames: nativeToolCalls.map(tc => tc.name) }));
