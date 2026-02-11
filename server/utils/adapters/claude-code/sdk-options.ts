@@ -74,6 +74,9 @@ export function buildSdkOptions(
     // using its own knowledge instead of ending with finish_reason
     // "tool_calls" (which LobeChat does not act on).
     maxTurns: 3,
+    // Disable native extended thinking — we handle thinking via prompt-based
+    // <thinking> tags and extract it ourselves (see thinking.ts).
+    maxThinkingTokens: 0,
     // Disable all built-in SDK tools (Read, Write, Bash, etc.)
     tools: [],
     settingSources: [],
