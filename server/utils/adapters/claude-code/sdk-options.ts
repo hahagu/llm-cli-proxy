@@ -67,13 +67,10 @@ export function buildSdkOptions(
 ) {
   const options: Record<string, unknown> = {
     model: request.model,
-    // Multi-turn: let the SDK execute MCP tool handlers and feed results
-    // back to the model so it can produce a final text response.  The
-    // proxy's tool handlers cannot actually run client tools, so they
-    // return a graceful fallback — the model gets a chance to respond
-    // using its own knowledge instead of ending with finish_reason
-    // "tool_calls" (which LobeChat does not act on).
-    maxTurns: 3,
+    // Single turn — the model produces tool_use blocks but the SDK stops
+    // before executing them.  The proxy streams the tool_call tokens to
+    // the client and always ends with finish_reason "stop".
+    maxTurns: 1,
     // Disable native extended thinking — we handle thinking via prompt-based
     // <thinking> tags and extract it ourselves (see thinking.ts).
     maxThinkingTokens: 0,

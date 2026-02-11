@@ -11,9 +11,11 @@ import type {
   OpenAIChatRequest,
   OpenAIChatResponse,
   OpenAIModelEntry,
+  OpenAIToolCall,
 } from "../types";
 import { generateId, nowUnix } from "../types";
 import { mapProviderHttpError, providerError } from "../../errors";
+import { randomUUID } from "crypto";
 
 import {
   hasImageContent,
@@ -21,7 +23,7 @@ import {
   convertMessagesMultimodal,
   createMultimodalPrompt,
 } from "./messages";
-import { buildMcpServer } from "./mcp-tools";
+import { stripMcpPrefix, buildMcpServer } from "./mcp-tools";
 import { resolveThinkingMode, extractThinkingFromText } from "./thinking";
 import { validateAndEnhanceRequest, buildSdkOptions } from "./sdk-options";
 import { createStream } from "./streaming";
@@ -57,6 +59,9 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     const thinkingMode = resolveThinkingMode(request);
     const wantsThinking = thinkingMode !== "off";
 
+    // Track native tool_use blocks from the model
+    const nativeToolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+
     for await (const message of query({
       prompt: prompt as string,
       options: buildSdkOptions(request, systemPrompt, promptSuffix, providerApiKey, false, thinkingMode, mcpServer as Record<string, unknown> | undefined),
@@ -65,6 +70,17 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
         for (const block of message.message.content) {
           if (block.type === "text") {
             resultText += block.text;
+          } else if (block.type === "tool_use") {
+            const tb = block as { id?: string; name?: string; input?: unknown };
+            const rawId = tb.id ?? "";
+            const callId = rawId.startsWith("toolu_")
+              ? `call_${rawId.slice(6)}`
+              : rawId || `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+            nativeToolCalls.push({
+              id: callId,
+              name: stripMcpPrefix(tb.name ?? ""),
+              arguments: typeof tb.input === "string" ? tb.input : JSON.stringify(tb.input ?? {}),
+            });
           } else if (block.type === "image") {
             const source = (block as Record<string, unknown>).source as
               | { type: string; media_type?: string; data?: string }
@@ -95,6 +111,18 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
       ? extractThinkingFromText(resultText)
       : { thinking: "", content: resultText };
 
+    // Include tool_calls in the response if the model produced any.
+    // Always use finish_reason "stop" — the client sees tool_calls in
+    // the message and handles them without needing "tool_calls" reason.
+    const toolCallsPayload: OpenAIToolCall[] | undefined =
+      nativeToolCalls.length > 0
+        ? nativeToolCalls.map((tc) => ({
+            id: tc.id,
+            type: "function" as const,
+            function: { name: tc.name, arguments: tc.arguments },
+          }))
+        : undefined;
+
     return {
       id: requestId,
       object: "chat.completion",
@@ -107,6 +135,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
             role: "assistant",
             content: cleanedText || null,
             ...(thinkingText ? { reasoning_content: thinkingText } : {}),
+            ...(toolCallsPayload ? { tool_calls: toolCallsPayload } : {}),
           },
           finish_reason: "stop",
         },
