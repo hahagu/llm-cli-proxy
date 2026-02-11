@@ -12,9 +12,7 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 FROM base AS build
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN --mount=type=cache,target=/app/node_modules/.cache \
-    --mount=type=cache,target=/app/.nuxt \
-    bun run build
+RUN --mount=type=cache,target=/app/node_modules/.cache bun run build
 
 # Production runner
 FROM base AS runner
