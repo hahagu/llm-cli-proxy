@@ -5,7 +5,7 @@
  * stream events into OpenAI-compatible SSE chunks. Handles:
  *
  * - Text delta streaming (including thinking tag detection)
- * - Deferred tool_call emission (init sent with first real arg fragment)
+ * - Immediate tool_call init emission (args streamed as they arrive)
  * - Assistant message backfill for tool calls with no streamed args
  * - Usage reporting and graceful client disconnection
  */
@@ -377,10 +377,10 @@ export async function createStream(
                   : rawId || `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
                 const toolName = stripMcpPrefix((block.name as string) ?? "");
                 const toolIndex = nativeToolCalls.length;
-                currentToolUse = { rawId, id: callId, name: toolName, index: toolIndex, emitted: false };
-                // Don't emit init yet — defer until first non-empty
-                // arg fragment so LobeChat never sees a tool call
-                // without argument data.
+                currentToolUse = { rawId, id: callId, name: toolName, index: toolIndex, emitted: true };
+                // Emit init immediately so clients can display the
+                // tool call right away (e.g. LobeChat subtasks).
+                emitToolCallInit(currentToolUse, "");
 
                 if (process.env.DEBUG_SDK) {
                   console.log("[SDK:tool_use:start]", JSON.stringify({ id: callId, name: toolName, rawId, rawName: block.name }));
@@ -396,12 +396,9 @@ export async function createStream(
                 if (!fragment) {
                   // Skip empty fragments (SDK "start" signal).
                   // Keep the keepalive running — real data may be far away.
-                } else if (!currentToolUse.emitted) {
-                  // First real data — emit init + first arg together.
-                  currentToolUse.emitted = true;
-                  emitToolCallInit(currentToolUse, fragment);
                 } else {
-                  // Subsequent fragments — just the args.
+                  // Stream arg fragments — init was already emitted
+                  // at content_block_start.
                   const argChunk: OpenAIStreamChunk = {
                     id: requestId,
                     object: "chat.completion.chunk",
