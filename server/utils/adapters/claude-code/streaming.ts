@@ -339,15 +339,17 @@ export async function createStream(
             if (event.type === "content_block_delta") {
               const delta = event.delta as Record<string, unknown>;
               if (delta?.type === "input_json_delta" && currentToolUse) {
-                stopKeepalive();
                 const fragment = (delta.partial_json as string) ?? "";
                 if (!fragment) {
                   // Skip empty fragments (SDK "start" signal).
+                  // Keep the keepalive running — real data may be far away.
                 } else if (!currentToolUse.emitted) {
+                  stopKeepalive();
                   // First real data — emit init + first arg together.
                   currentToolUse.emitted = true;
                   emitToolCallInit(currentToolUse, fragment);
                 } else {
+                  stopKeepalive();
                   // Subsequent fragments — just the args.
                   const argChunk: OpenAIStreamChunk = {
                     id: requestId,
