@@ -109,7 +109,6 @@ export async function createStream(
         // --- Native tool_use tracking ---
         const nativeToolCalls: Array<{ id: string; name: string }> = [];
         let currentToolUse: { id: string; name: string; index: number } | null = null;
-        let currentToolArgBuffer = "";
 
         function emitThinkingDelta(text: string) {
           if (!text) return;
@@ -259,7 +258,7 @@ export async function createStream(
               }
             }
 
-            // --- content_block_start: begin tool_use capture ---
+            // --- content_block_start: begin tool_use, emit init chunk immediately ---
             if (event.type === "content_block_start") {
               const block = event.content_block as Record<string, unknown> | undefined;
               if (block?.type === "tool_use") {
@@ -270,36 +269,10 @@ export async function createStream(
                 const toolName = stripMcpPrefix((block.name as string) ?? "");
                 const toolIndex = nativeToolCalls.length;
                 currentToolUse = { id: callId, name: toolName, index: toolIndex };
-                currentToolArgBuffer = "";
 
-                if (process.env.DEBUG_SDK) {
-                  console.log("[SDK:tool_use:start]", JSON.stringify({ id: callId, name: toolName, rawId, rawName: block.name }));
-                }
-              }
-            }
-
-            // --- content_block_delta: buffer tool args or stream text ---
-            if (event.type === "content_block_delta") {
-              const delta = event.delta as Record<string, unknown>;
-              if (delta?.type === "input_json_delta" && currentToolUse) {
-                const fragment = (delta.partial_json as string) ?? "";
-                if (fragment) {
-                  currentToolArgBuffer += fragment;
-                }
-                safeEnqueue(": keepalive\n\n");
-              } else if (delta?.type === "text_delta" && delta.text) {
-                feedText(delta.text as string);
-              }
-            }
-
-            // --- content_block_stop: two-phase tool_call emission ---
-            // Both phases emitted back-to-back so the client can't
-            // execute between them with empty arguments.
-            if (event.type === "content_block_stop") {
-              if (currentToolUse) {
-                const completeArgs = currentToolArgBuffer || "{}";
-
-                // Phase 1: register the tool call (id + name + empty args)
+                // Emit tool call init immediately so the client sees a
+                // data event right away (keeps the SSE connection alive
+                // during the argument streaming that follows).
                 const initChunk: OpenAIStreamChunk = {
                   id: requestId,
                   object: "chat.completion.chunk",
@@ -309,10 +282,10 @@ export async function createStream(
                     index: 0,
                     delta: {
                       tool_calls: [{
-                        index: currentToolUse.index,
-                        id: currentToolUse.id,
+                        index: toolIndex,
+                        id: callId,
                         type: "function",
-                        function: { name: currentToolUse.name, arguments: "" },
+                        function: { name: toolName, arguments: "" },
                       }],
                     },
                     logprobs: null,
@@ -321,7 +294,19 @@ export async function createStream(
                 };
                 safeEnqueue(`data: ${JSON.stringify(initChunk)}\n\n`);
 
-                // Phase 2: deliver complete arguments (immediately after)
+                if (process.env.DEBUG_SDK) {
+                  console.log("[SDK:tool_use:start]", JSON.stringify({ id: callId, name: toolName, rawId, rawName: block.name }));
+                }
+              }
+            }
+
+            // --- content_block_delta: stream tool arg fragments or text ---
+            if (event.type === "content_block_delta") {
+              const delta = event.delta as Record<string, unknown>;
+              if (delta?.type === "input_json_delta" && currentToolUse) {
+                const fragment = (delta.partial_json as string) ?? "";
+                // Stream each arg fragment as a real data event (not a
+                // comment) so the client's SSE parser stays engaged.
                 const argChunk: OpenAIStreamChunk = {
                   id: requestId,
                   object: "chat.completion.chunk",
@@ -332,7 +317,7 @@ export async function createStream(
                     delta: {
                       tool_calls: [{
                         index: currentToolUse.index,
-                        function: { arguments: completeArgs },
+                        function: { arguments: fragment },
                       }],
                     },
                     logprobs: null,
@@ -340,16 +325,22 @@ export async function createStream(
                   }],
                 };
                 safeEnqueue(`data: ${JSON.stringify(argChunk)}\n\n`);
+              } else if (delta?.type === "text_delta" && delta.text) {
+                feedText(delta.text as string);
+              }
+            }
 
+            // --- content_block_stop: finalize tool_use tracking ---
+            if (event.type === "content_block_stop") {
+              if (currentToolUse) {
                 nativeToolCalls.push({
                   id: currentToolUse.id,
                   name: currentToolUse.name,
                 });
                 if (process.env.DEBUG_SDK) {
-                  console.log("[SDK:tool_use:complete]", JSON.stringify({ id: currentToolUse.id, name: currentToolUse.name, argLen: completeArgs.length }));
+                  console.log("[SDK:tool_use:complete]", JSON.stringify({ id: currentToolUse.id, name: currentToolUse.name }));
                 }
                 currentToolUse = null;
-                currentToolArgBuffer = "";
               }
             }
 
