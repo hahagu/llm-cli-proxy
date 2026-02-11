@@ -116,7 +116,25 @@ export async function createStream(
         // Start keepalive immediately — the SDK may take time before
         // emitting the first event (MCP server init, model warm-up).
         startKeepalive();
-        let sentRole = false;
+
+        // Send the role chunk immediately so the client knows the
+        // response is active.  Without this, follow-up requests that
+        // fail before message_start produce an empty 200 body and the
+        // client's loading indicator persists forever.
+        const roleChunk: OpenAIStreamChunk = {
+          id: requestId,
+          object: "chat.completion.chunk",
+          created: nowUnix(),
+          model,
+          choices: [{
+            index: 0,
+            delta: { role: "assistant", content: "" },
+            logprobs: null,
+            finish_reason: null,
+          }],
+        };
+        safeEnqueue(`data: ${JSON.stringify(roleChunk)}\n\n`);
+        let sentRole = true;
 
         // --- Thinking tag detection state machine ---
         const OPEN_TAG = "<thinking>";
@@ -346,12 +364,10 @@ export async function createStream(
                   // Skip empty fragments (SDK "start" signal).
                   // Keep the keepalive running — real data may be far away.
                 } else if (!currentToolUse.emitted) {
-                  stopKeepalive();
                   // First real data — emit init + first arg together.
                   currentToolUse.emitted = true;
                   emitToolCallInit(currentToolUse, fragment);
                 } else {
-                  stopKeepalive();
                   // Subsequent fragments — just the args.
                   const argChunk: OpenAIStreamChunk = {
                     id: requestId,
@@ -493,8 +509,37 @@ export async function createStream(
         safeClose();
       } catch (err) {
         stopKeepalive();
-        if (!streamClosed) console.error("[SSE:error]", err);
-        safeError(err);
+        if (!streamClosed) {
+          console.error("[SSE:error]", err);
+          // Emit the error as a visible text delta so the client can
+          // display it, then send a proper finish + [DONE].  This is
+          // far better than controller.error() which silently kills the
+          // TCP connection — LobeChat would show a perpetual spinner.
+          const errMsg = err instanceof Error ? err.message : String(err);
+          const errChunk: OpenAIStreamChunk = {
+            id: requestId,
+            object: "chat.completion.chunk",
+            created: nowUnix(),
+            model,
+            choices: [{
+              index: 0,
+              delta: { content: `\n\n[Error: ${errMsg}]` },
+              logprobs: null,
+              finish_reason: null,
+            }],
+          };
+          safeEnqueue(`data: ${JSON.stringify(errChunk)}\n\n`);
+          const finChunk: OpenAIStreamChunk = {
+            id: requestId,
+            object: "chat.completion.chunk",
+            created: nowUnix(),
+            model,
+            choices: [{ index: 0, delta: {}, logprobs: null, finish_reason: "stop" }],
+          };
+          safeEnqueue(`data: ${JSON.stringify(finChunk)}\n\n`);
+          safeEnqueue("data: [DONE]\n\n");
+          safeClose();
+        }
       }
     },
     cancel() {
