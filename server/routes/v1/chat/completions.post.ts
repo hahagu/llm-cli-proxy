@@ -43,6 +43,17 @@ export default defineEventHandler(async (event) => {
   }
   const body = parsed.data as OpenAIChatRequest;
 
+  // Always log incoming request shape for debugging tool-call issues
+  console.log("[REQ]", JSON.stringify({
+    model: body.model,
+    stream: body.stream,
+    toolCount: body.tools?.length ?? 0,
+    toolNames: body.tools?.map((t) => t.function.name) ?? [],
+    msgCount: body.messages.length,
+    roles: body.messages.map((m) => m.role),
+    hasToolChoice: !!body.tool_choice,
+  }));
+
   try {
     const result = await executeProxyRequest(body, keyData);
 
