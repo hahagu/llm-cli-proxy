@@ -6,7 +6,7 @@
  *
  * - Text delta streaming (including thinking tag detection)
  * - Two-phase tool_call emission (Phase 1: id/name, Phase 2: args)
- * - Deferred tool_call init (sent with first arg fragment)
+ * - Standard OpenAI tool_call streaming (init chunk + arg fragments)
  * - Usage reporting and graceful client disconnection
  */
 
@@ -76,6 +76,7 @@ export async function createStream(
   });
 
   let streamClosed = false;
+  let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 
   return new ReadableStream<string>({
     async start(controller) {
@@ -96,6 +97,21 @@ export async function createStream(
         try { controller.error(err); } catch { /* already closed */ }
       }
 
+      // SSE comment keepalive — keeps the TCP connection alive during
+      // gaps between content_block_start and the first arg fragment.
+      function startKeepalive() {
+        if (keepaliveTimer) return;
+        keepaliveTimer = setInterval(() => {
+          safeEnqueue(": keepalive\n\n");
+        }, 5_000);
+      }
+      function stopKeepalive() {
+        if (keepaliveTimer) {
+          clearInterval(keepaliveTimer);
+          keepaliveTimer = null;
+        }
+      }
+
       try {
         let sentRole = false;
 
@@ -107,8 +123,12 @@ export async function createStream(
         let tagBuffer = "";
 
         // --- Native tool_use tracking ---
-        const nativeToolCalls: Array<{ id: string; name: string }> = [];
-        let currentToolUse: { id: string; name: string; index: number; sentInit: boolean } | null = null;
+        const nativeToolCalls: Array<{ rawId: string; id: string; name: string; index: number }> = [];
+        let currentToolUse: { rawId: string; id: string; name: string; index: number } | null = null;
+        // Track which tool calls received at least one input_json_delta.
+        // Tool calls NOT in this set need args backfilled from the
+        // assistant message.
+        const toolCallsWithArgs = new Set<string>();
 
         function emitThinkingDelta(text: string) {
           if (!text) return;
@@ -215,7 +235,17 @@ export async function createStream(
             if ("subtype" in message) { summary.subtype = (message as any).subtype; logIt = true; }
             if (message.type === "stream_event") {
               const ev = (message as any).event;
-              if (ev?.type !== "content_block_delta") {
+              if (ev?.type === "content_block_delta") {
+                const dt = ev?.delta?.type;
+                // Log input_json_delta (first occurrence per tool) to
+                // confirm arg streaming is working; skip noisy text deltas.
+                if (dt === "input_json_delta") {
+                  summary.eventType = ev.type;
+                  summary.deltaType = dt;
+                  summary.fragmentLen = (ev?.delta?.partial_json ?? "").length;
+                  logIt = true;
+                }
+              } else {
                 summary.eventType = ev?.type;
                 if (ev?.type === "content_block_start") summary.blockType = ev?.content_block?.type;
                 logIt = true;
@@ -223,7 +253,11 @@ export async function createStream(
             }
             if (message.type === "assistant") {
               const blocks = (message as any).message?.content;
-              summary.blocks = blocks?.map((b: any) => ({ type: b.type, ...(b.name ? { name: b.name } : {}) }));
+              summary.blocks = blocks?.map((b: any) => ({
+                type: b.type,
+                ...(b.name ? { name: b.name } : {}),
+                ...(b.type === "tool_use" ? { id: b.id, hasInput: !!b.input && Object.keys(b.input).length > 0 } : {}),
+              }));
               logIt = true;
             }
             if (message.type === "system" && (message as any).subtype === "init") {
@@ -268,7 +302,30 @@ export async function createStream(
                   : rawId || `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
                 const toolName = stripMcpPrefix((block.name as string) ?? "");
                 const toolIndex = nativeToolCalls.length;
-                currentToolUse = { id: callId, name: toolName, index: toolIndex, sentInit: false };
+                currentToolUse = { rawId, id: callId, name: toolName, index: toolIndex };
+
+                // Standard OpenAI init chunk: id/type/name + arguments: ""
+                const initChunk: OpenAIStreamChunk = {
+                  id: requestId,
+                  object: "chat.completion.chunk",
+                  created: nowUnix(),
+                  model,
+                  choices: [{
+                    index: 0,
+                    delta: {
+                      tool_calls: [{
+                        index: toolIndex,
+                        id: callId,
+                        type: "function",
+                        function: { name: toolName, arguments: "" },
+                      }],
+                    },
+                    logprobs: null,
+                    finish_reason: null,
+                  }],
+                };
+                safeEnqueue(`data: ${JSON.stringify(initChunk)}\n\n`);
+                startKeepalive();
 
                 if (process.env.DEBUG_SDK) {
                   console.log("[SDK:tool_use:start]", JSON.stringify({ id: callId, name: toolName, rawId, rawName: block.name }));
@@ -280,22 +337,9 @@ export async function createStream(
             if (event.type === "content_block_delta") {
               const delta = event.delta as Record<string, unknown>;
               if (delta?.type === "input_json_delta" && currentToolUse) {
+                stopKeepalive();
+                toolCallsWithArgs.add(currentToolUse.rawId);
                 const fragment = (delta.partial_json as string) ?? "";
-
-                // First fragment: send init info (id/type/name) together
-                // with the argument data so LobeChat never sees a tool
-                // call header without arguments.
-                const toolCall: Record<string, unknown> = {
-                  index: currentToolUse.index,
-                  function: { arguments: fragment },
-                };
-                if (!currentToolUse.sentInit) {
-                  currentToolUse.sentInit = true;
-                  toolCall.id = currentToolUse.id;
-                  toolCall.type = "function";
-                  (toolCall.function as Record<string, unknown>).name = currentToolUse.name;
-                }
-
                 const argChunk: OpenAIStreamChunk = {
                   id: requestId,
                   object: "chat.completion.chunk",
@@ -303,7 +347,12 @@ export async function createStream(
                   model,
                   choices: [{
                     index: 0,
-                    delta: { tool_calls: [toolCall] },
+                    delta: {
+                      tool_calls: [{
+                        index: currentToolUse.index,
+                        function: { arguments: fragment },
+                      }],
+                    },
                     logprobs: null,
                     finish_reason: null,
                   }],
@@ -317,9 +366,12 @@ export async function createStream(
             // --- content_block_stop: finalize tool_use, signal completion ---
             if (event.type === "content_block_stop") {
               if (currentToolUse) {
+                stopKeepalive();
                 nativeToolCalls.push({
+                  rawId: currentToolUse.rawId,
                   id: currentToolUse.id,
                   name: currentToolUse.name,
+                  index: currentToolUse.index,
                 });
                 if (process.env.DEBUG_SDK) {
                   console.log("[SDK:tool_use:complete]", JSON.stringify({ id: currentToolUse.id, name: currentToolUse.name }));
@@ -332,6 +384,42 @@ export async function createStream(
             if (event.type === "message_delta") {
               flushPending();
               lastUsage = (event.usage as Record<string, number> | undefined) ?? lastUsage;
+            }
+          }
+
+          // --- assistant message: backfill args for tool calls that
+          //     never received input_json_delta events ---
+          if (message.type === "assistant") {
+            const blocks = ((message as any).message?.content ?? []) as Array<Record<string, unknown>>;
+            for (const block of blocks) {
+              if (block.type !== "tool_use") continue;
+              const rawId = block.id as string;
+              if (toolCallsWithArgs.has(rawId)) continue;
+              // Find matching tracked tool call
+              const tc = nativeToolCalls.find((t) => t.rawId === rawId);
+              if (!tc) continue;
+              const argsStr = JSON.stringify(block.input ?? {});
+              const argChunk: OpenAIStreamChunk = {
+                id: requestId,
+                object: "chat.completion.chunk",
+                created: nowUnix(),
+                model,
+                choices: [{
+                  index: 0,
+                  delta: {
+                    tool_calls: [{
+                      index: tc.index,
+                      function: { arguments: argsStr },
+                    }],
+                  },
+                  logprobs: null,
+                  finish_reason: null,
+                }],
+              };
+              safeEnqueue(`data: ${JSON.stringify(argChunk)}\n\n`);
+              if (process.env.DEBUG_SDK) {
+                console.log("[SDK:tool_use:backfill]", JSON.stringify({ id: tc.id, rawId, argsLen: argsStr.length }));
+              }
             }
           }
 
@@ -348,10 +436,9 @@ export async function createStream(
         }
 
         // All done — flush buffers and emit final chunks.
-        // Always use "stop" — the client sees tool_calls in the deltas
-        // and handles them without needing finish_reason "tool_calls".
+        stopKeepalive();
         flushPending();
-        const stopReason = "stop";
+        const stopReason = nativeToolCalls.length > 0 ? "tool_calls" : "stop";
 
         if (process.env.DEBUG_SDK) {
           console.log("[SDK:emit]", JSON.stringify({ nativeToolCalls: nativeToolCalls.length, toolNames: nativeToolCalls.map(tc => tc.name) }));
@@ -379,12 +466,14 @@ export async function createStream(
         }
         safeClose();
       } catch (err) {
+        stopKeepalive();
         if (!streamClosed) console.error("[SSE:error]", err);
         safeError(err);
       }
     },
     cancel() {
       streamClosed = true;
+      stopKeepalive();
     },
   });
 }
