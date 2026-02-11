@@ -5,10 +5,9 @@
  * `createSdkMcpServer()`. The model discovers them through the API (not
  * prompt-based) and calls them via standard `tool_use` blocks.
  *
- * With maxTurns > 1 the SDK executes tool handlers and feeds the result
- * back to the model for a follow-up response.  Since the proxy cannot
- * actually run client-defined tools, handlers return a graceful message
- * asking the model to continue with its own knowledge.
+ * Handlers return a "[DEFERRED]" placeholder — with maxTurns:1 the SDK
+ * stops before the model sees the result, and we capture the tool_use
+ * from the stream to forward back to the client.
  *
  * JSON Schema → Zod conversion preserves nested objects, arrays, enums,
  * and descriptions so the model sees the full parameter structure.
@@ -132,12 +131,7 @@ export async function buildMcpServer(tools: OpenAITool[]) {
       t.function.name,
       t.function.description ?? "",
       shape,
-      async () => ({
-        content: [{
-          type: "text" as const,
-          text: "Tool execution is not available in proxy mode. Please respond to the user directly using your built-in knowledge and the conversation context.",
-        }],
-      }),
+      async () => ({ content: [{ type: "text" as const, text: "[DEFERRED]" }] }),
     );
   });
 
