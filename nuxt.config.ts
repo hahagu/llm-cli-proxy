@@ -3,14 +3,16 @@ import tailwindcss from "@tailwindcss/vite";
 // https://nuxt.com/docs/api/configuration/nuxt-config
 export default defineNuxtConfig({
   compatibilityDate: "2025-07-15",
-  devtools: { enabled: true },
+  devtools: { enabled: process.env.NODE_ENV !== "production" },
 
   css: ["~/assets/css/tailwind.css"],
 
   modules: [
     "@nuxt/image",
     "@nuxt/icon",
-    "@nuxt/eslint",
+    // Exclude ESLint module from production builds — it runs config generation,
+    // type-gen, and inspector setup that are unnecessary outside development.
+    ...(process.env.NODE_ENV !== "production" ? ["@nuxt/eslint"] as const : []),
     "@nuxt/fonts",
     "shadcn-nuxt",
     "convex-nuxt",
