@@ -71,6 +71,9 @@ export function buildSdkOptions(
     // requests.  With maxTurns:1 the model produces tool_use blocks but
     // the SDK stops before executing them, so we can capture and forward.
     maxTurns: 1,
+    // Disable native extended thinking — we handle thinking via prompt-based
+    // <thinking> tags and extract it ourselves (see thinking.ts).
+    maxThinkingTokens: 0,
     // Disable all built-in SDK tools (Read, Write, Bash, etc.)
     tools: [],
     settingSources: [],
