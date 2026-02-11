@@ -5,10 +5,9 @@
  * `createSdkMcpServer()`. The model discovers them through the API (not
  * prompt-based) and calls them via standard `tool_use` blocks.
  *
- * With maxTurns > 1 the SDK self-calls tool handlers and feeds results
- * back to the model for follow-up turns.  Handlers echo the call
- * arguments back as JSON so the model can incorporate them into its
- * streamed response.
+ * Handlers return a placeholder — with maxTurns:1 the SDK stops before
+ * executing them, and the proxy streams the tool_use blocks to the
+ * client as OpenAI-format tool_call chunks.
  *
  * JSON Schema → Zod conversion preserves nested objects, arrays, enums,
  * and descriptions so the model sees the full parameter structure.
@@ -132,12 +131,7 @@ export async function buildMcpServer(tools: OpenAITool[]) {
       t.function.name,
       t.function.description ?? "",
       shape,
-      async (args: Record<string, unknown>) => ({
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify(args),
-        }],
-      }),
+      async () => ({ content: [{ type: "text" as const, text: "[DEFERRED]" }] }),
     );
   });
 
