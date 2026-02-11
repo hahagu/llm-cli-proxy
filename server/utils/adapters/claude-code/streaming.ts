@@ -126,7 +126,7 @@ export async function createStream(
 
         // --- Native tool_use tracking ---
         const nativeToolCalls: Array<{ id: string; name: string }> = [];
-        let currentToolUse: { id: string; name: string; index: number } | null = null;
+        let currentToolUse: { id: string; name: string; index: number; sentInit: boolean } | null = null;
 
         function emitThinkingDelta(text: string) {
           if (!text) return;
@@ -286,33 +286,12 @@ export async function createStream(
                   : rawId || `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
                 const toolName = stripMcpPrefix((block.name as string) ?? "");
                 const toolIndex = nativeToolCalls.length;
-                currentToolUse = { id: callId, name: toolName, index: toolIndex };
+                currentToolUse = { id: callId, name: toolName, index: toolIndex, sentInit: false };
 
-                // Emit tool call init immediately so the client sees a
-                // data event right away (keeps the SSE connection alive
-                // during the argument streaming that follows).
-                const initChunk: OpenAIStreamChunk = {
-                  id: requestId,
-                  object: "chat.completion.chunk",
-                  created: nowUnix(),
-                  model,
-                  choices: [{
-                    index: 0,
-                    delta: {
-                      tool_calls: [{
-                        index: toolIndex,
-                        id: callId,
-                        type: "function",
-                        function: { name: toolName },
-                      }],
-                    },
-                    logprobs: null,
-                    finish_reason: null,
-                  }],
-                };
-                safeEnqueue(`data: ${JSON.stringify(initChunk)}\n\n`);
-                // Start keepalive in case there's a gap before the first
-                // arg fragment arrives.
+                // Don't emit an init chunk yet — defer it until the first
+                // arg fragment arrives so LobeChat never sees a tool call
+                // header without accompanying argument data.  SSE comment
+                // keepalives keep the connection alive in the meantime.
                 startToolKeepalive();
 
                 if (process.env.DEBUG_SDK) {
@@ -328,8 +307,21 @@ export async function createStream(
                 // Real arg data is flowing — no need for keepalive.
                 stopToolKeepalive();
                 const fragment = (delta.partial_json as string) ?? "";
-                // Stream each arg fragment as a real data event so the
-                // client's SSE parser stays engaged.
+
+                // First fragment: send init info (id/type/name) together
+                // with the argument data so LobeChat never sees a tool
+                // call header without arguments.
+                const toolCall: Record<string, unknown> = {
+                  index: currentToolUse.index,
+                  function: { arguments: fragment },
+                };
+                if (!currentToolUse.sentInit) {
+                  currentToolUse.sentInit = true;
+                  toolCall.id = currentToolUse.id;
+                  toolCall.type = "function";
+                  (toolCall.function as Record<string, unknown>).name = currentToolUse.name;
+                }
+
                 const argChunk: OpenAIStreamChunk = {
                   id: requestId,
                   object: "chat.completion.chunk",
@@ -337,12 +329,7 @@ export async function createStream(
                   model,
                   choices: [{
                     index: 0,
-                    delta: {
-                      tool_calls: [{
-                        index: currentToolUse.index,
-                        function: { arguments: fragment },
-                      }],
-                    },
+                    delta: { tool_calls: [toolCall] },
                     logprobs: null,
                     finish_reason: null,
                   }],
