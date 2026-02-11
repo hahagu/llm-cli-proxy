@@ -111,29 +111,14 @@ export async function createStream(
         const nativeToolCalls: Array<{ id: string; name: string }> = [];
         let currentToolUse: { id: string; name: string; index: number } | null = null;
 
-        /** Send empty-args deltas as keepalive during tool_use gaps. */
+        /** Send SSE comments as keepalive during tool_use gaps.
+         *  SSE comments (lines starting with `:`) carry no data payload
+         *  so they won't interfere with LobeChat's argument parsing,
+         *  but they keep the TCP connection alive. */
         function startToolKeepalive() {
-          if (keepaliveTimer || !currentToolUse) return;
-          const tu = currentToolUse;
+          if (keepaliveTimer) return;
           keepaliveTimer = setInterval(() => {
-            const chunk: OpenAIStreamChunk = {
-              id: requestId,
-              object: "chat.completion.chunk",
-              created: nowUnix(),
-              model,
-              choices: [{
-                index: 0,
-                delta: {
-                  tool_calls: [{
-                    index: tu.index,
-                    function: { arguments: "" },
-                  }],
-                },
-                logprobs: null,
-                finish_reason: null,
-              }],
-            };
-            safeEnqueue(`data: ${JSON.stringify(chunk)}\n\n`);
+            safeEnqueue(": keepalive\n\n");
           }, 5_000);
         }
         function stopToolKeepalive() {
@@ -372,27 +357,6 @@ export async function createStream(
             if (event.type === "content_block_stop") {
               if (currentToolUse) {
                 stopToolKeepalive();
-                // Emit a final empty-args delta so the client knows this
-                // tool call's arguments are complete.
-                const doneChunk: OpenAIStreamChunk = {
-                  id: requestId,
-                  object: "chat.completion.chunk",
-                  created: nowUnix(),
-                  model,
-                  choices: [{
-                    index: 0,
-                    delta: {
-                      tool_calls: [{
-                        index: currentToolUse.index,
-                        function: { arguments: "" },
-                      }],
-                    },
-                    logprobs: null,
-                    finish_reason: null,
-                  }],
-                };
-                safeEnqueue(`data: ${JSON.stringify(doneChunk)}\n\n`);
-
                 nativeToolCalls.push({
                   id: currentToolUse.id,
                   name: currentToolUse.name,
