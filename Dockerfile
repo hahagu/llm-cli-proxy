@@ -1,29 +1,27 @@
 FROM oven/bun:1 AS base
 WORKDIR /app
 
-# Install all dependencies (needed for the build step)
+# Install all dependencies (needed for build and runtime because Nitro
+# dependency tracing is disabled for faster builds)
 FROM base AS deps
 COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile
-
-# Install production-only dependencies (needed at runtime because Nitro
-# dependency tracing is disabled for faster builds)
-FROM base AS prod-deps
-COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile --production
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    bun install --frozen-lockfile
 
 # Build the application
 FROM base AS build
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN --mount=type=cache,target=/app/node_modules/.cache bun run build
+RUN --mount=type=cache,target=/app/node_modules/.cache \
+    --mount=type=cache,target=/app/.nuxt \
+    bun run build
 
 # Production runner
 FROM base AS runner
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app/.output ./.output
-COPY --from=prod-deps /app/node_modules ./node_modules
+COPY --from=deps /app/node_modules ./node_modules
 # Local convex generated code is referenced by absolute path in the Nitro
 # output when externals tracing is disabled
 COPY --from=build /app/convex/_generated ./convex/_generated
