@@ -1,10 +1,10 @@
 /**
  * Thinking / reasoning mode support for the Claude Code adapter.
  *
- * Maps OpenAI-style `reasoning_effort` and Anthropic-style `thinking`
- * parameters to prompt-based <thinking> tags. The model writes its
- * reasoning inside these tags, and the streaming layer routes the
- * content to `reasoning_content` in the OpenAI delta format.
+ * Maps `thinking.type` and `output_config.effort` parameters to
+ * prompt-based <thinking> tags. The model writes its reasoning inside
+ * these tags, and the streaming layer routes the content to
+ * `reasoning_content` in the OpenAI delta format.
  */
 
 import type { OpenAIChatRequest } from "../types";
@@ -13,7 +13,7 @@ import type { OpenAIChatRequest } from "../types";
 export type ThinkingMode = "off" | "forced" | "adaptive";
 
 /** Effort level for thinking depth. */
-export type ThinkingEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ThinkingEffort = "low" | "medium" | "high" | "max";
 
 /** Resolve thinking mode from request parameters. */
 export function resolveThinkingMode(request: OpenAIChatRequest): ThinkingMode {
@@ -22,24 +22,22 @@ export function resolveThinkingMode(request: OpenAIChatRequest): ThinkingMode {
   if (request.thinking?.type === "adaptive") return "adaptive";
   if (request.thinking?.type === "disabled") return "off";
 
-  // OpenAI-style reasoning_effort
-  if (request.reasoning_effort && request.reasoning_effort !== "none") return "forced";
+  // output_config.effort implies forced thinking
+  if (request.output_config?.effort) return "forced";
 
   return "off";
 }
 
 /** Resolve effort level from request. */
 export function resolveThinkingEffort(request: OpenAIChatRequest): ThinkingEffort {
-  if (request.reasoning_effort && request.reasoning_effort !== "none") {
-    return request.reasoning_effort as ThinkingEffort;
+  if (request.output_config?.effort) {
+    return request.output_config.effort;
   }
   return "medium";
 }
 
 /** Effort-specific depth instructions. */
 const EFFORT_INSTRUCTIONS: Record<ThinkingEffort, string> = {
-  minimal:
-    "Keep your thinking brief — a few sentences identifying the key point and your approach.",
   low:
     "Think briefly — outline your main reasoning steps and key considerations in a short paragraph.",
   medium:
@@ -49,7 +47,7 @@ const EFFORT_INSTRUCTIONS: Record<ThinkingEffort, string> = {
     "Think deeply and thoroughly. Explore multiple perspectives, consider edge cases, weigh " +
     "trade-offs, challenge your initial assumptions, and build a detailed chain of reasoning. " +
     "Your thinking should be substantially longer than your final answer.",
-  xhigh:
+  max:
     "Think with maximum depth and rigor. Perform exhaustive analysis: explore all relevant angles, " +
     "consider counterarguments, examine edge cases, draw connections between concepts, question " +
     "assumptions, and reason through each step in detail. Produce a comprehensive chain of thought " +
@@ -60,18 +58,18 @@ const EFFORT_INSTRUCTIONS: Record<ThinkingEffort, string> = {
 export function buildThinkingPrompt(mode: ThinkingMode, effort: ThinkingEffort): string {
   if (mode === "off") return "";
 
-  const depthInstruction = EFFORT_INSTRUCTIONS[effort];
-
   const coreInstruction =
     "Your thinking must focus on the SUBJECT MATTER of the user's question — " +
     "analyze the topic, reason about concepts, work through logic, and develop your answer. " +
     "Do NOT use the thinking section to discuss tool availability or your own capabilities.";
 
   if (mode === "adaptive") {
+    // In adaptive mode the model decides whether and how deeply to think,
+    // so we intentionally omit effort-level instructions.
     return (
       "\n\nFor questions that benefit from careful reasoning, you may think through your " +
       "response inside <thinking>...</thinking> XML tags before answering. " +
-      depthInstruction + " " + coreInstruction + " " +
+      coreInstruction + " " +
       "Place your reasoning inside <thinking> tags, then provide your final answer AFTER the " +
       "closing </thinking> tag. The thinking section is shown separately to the user as your " +
       "reasoning process. For truly trivial questions, you may respond directly without thinking tags."
@@ -79,6 +77,7 @@ export function buildThinkingPrompt(mode: ThinkingMode, effort: ThinkingEffort):
   }
 
   // forced mode
+  const depthInstruction = EFFORT_INSTRUCTIONS[effort];
   return (
     "\n\nIMPORTANT: Before answering, you MUST reason through the problem step-by-step " +
     "inside <thinking>...</thinking> XML tags. " +

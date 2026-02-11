@@ -106,10 +106,11 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
       }
     }
 
-    // Extract thinking from text if thinking was requested
-    const { thinking: thinkingText, content: cleanedText } = wantsThinking
-      ? extractThinkingFromText(resultText)
-      : { thinking: "", content: resultText };
+    // Always extract thinking tags — the model may produce them
+    // spontaneously even when not requested.  We strip them from content
+    // and only include reasoning_content when the user actually asked.
+    const { thinking: thinkingText, content: cleanedText } =
+      extractThinkingFromText(resultText);
 
     // Include tool_calls in the response if the model produced any.
     // Always use finish_reason "stop" — the client sees tool_calls in
@@ -134,7 +135,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           message: {
             role: "assistant",
             content: cleanedText || null,
-            ...(thinkingText ? { reasoning_content: thinkingText } : {}),
+            ...(wantsThinking && thinkingText ? { reasoning_content: thinkingText } : {}),
             ...(toolCallsPayload ? { tool_calls: toolCallsPayload } : {}),
           },
           finish_reason: "stop",

@@ -140,7 +140,10 @@ export async function createStream(
         const OPEN_TAG = "<thinking>";
         const CLOSE_TAG = "</thinking>";
         type ThinkingState = "detect_start" | "in_thinking" | "in_content" | "passthrough";
-        let thinkingState: ThinkingState = wantsThinking ? "detect_start" : "passthrough";
+        // Always detect thinking tags — even when not requested, the model
+        // may produce them spontaneously.  We strip them from content and
+        // only route to reasoning_content when the user actually asked.
+        let thinkingState: ThinkingState = "detect_start";
         let tagBuffer = "";
 
         // --- Native tool_use tracking ---
@@ -207,6 +210,8 @@ export async function createStream(
 
         function emitThinkingDelta(text: string) {
           if (!text) return;
+          // Silently discard thinking content when user didn't request it
+          if (!wantsThinking) return;
           const chunk: OpenAIStreamChunk = {
             id: requestId,
             object: "chat.completion.chunk",
