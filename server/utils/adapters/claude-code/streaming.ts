@@ -5,16 +5,14 @@
  * stream events into OpenAI-compatible SSE chunks. Handles:
  *
  * - Text delta streaming (including thinking tag detection)
- * - Two-phase tool_call emission (Phase 1: id/name, Phase 2: args)
- * - SSE keepalive during argument buffering
- * - Second-turn suppression (placeholder tool results)
+ * - Multi-turn tool execution (tool calls handled server-side by SDK)
+ * - SSE keepalive during tool argument buffering and between turns
  * - Usage reporting and graceful client disconnection
  */
 
 import type { OpenAIChatRequest, OpenAIStreamChunk } from "../types";
 import { generateId, nowUnix } from "../types";
 import { providerError } from "../../errors";
-import { randomUUID } from "crypto";
 import { stripMcpPrefix, buildMcpServer } from "./mcp-tools";
 import { resolveThinkingMode } from "./thinking";
 import {
@@ -77,6 +75,7 @@ export async function createStream(
   });
 
   let streamClosed = false;
+  let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 
   return new ReadableStream<string>({
     async start(controller) {
@@ -107,12 +106,25 @@ export async function createStream(
         let thinkingState: ThinkingState = wantsThinking ? "detect_start" : "passthrough";
         let tagBuffer = "";
 
-        // --- Native tool_use tracking ---
+        // --- Native tool_use tracking (for debug logging) ---
         const nativeToolCalls: Array<{ id: string; name: string }> = [];
-        let currentToolUse: { id: string; name: string; index: number } | null = null;
-        let currentToolArgBuffer = "";
-        let messageStartCount = 0;
-        let suppressSecondTurn = false;
+        let inToolUseBlock = false;
+        let turnHadToolUse = false;
+
+        /** Start sending periodic keepalives during gaps between turns. */
+        function startKeepalive() {
+          if (keepaliveTimer) return;
+          keepaliveTimer = setInterval(() => {
+            safeEnqueue(": keepalive\n\n");
+          }, 15_000);
+        }
+        /** Stop the inter-turn keepalive timer. */
+        function stopKeepalive() {
+          if (keepaliveTimer) {
+            clearInterval(keepaliveTimer);
+            keepaliveTimer = null;
+          }
+        }
 
         function emitThinkingDelta(text: string) {
           if (!text) return;
@@ -242,12 +254,10 @@ export async function createStream(
           if (message.type === "stream_event") {
             const event = message.event as Record<string, unknown>;
 
-            // --- message_start: emit role chunk, detect second turn ---
+            // --- message_start: emit role chunk, manage keepalive ---
             if (event.type === "message_start") {
-              messageStartCount++;
-              if (messageStartCount > 1 && nativeToolCalls.length > 0) {
-                suppressSecondTurn = true;
-              }
+              stopKeepalive();
+              turnHadToolUse = false;
               if (!sentRole) {
                 sentRole = true;
                 const chunk: OpenAIStreamChunk = {
@@ -263,109 +273,56 @@ export async function createStream(
                   }],
                 };
                 safeEnqueue(`data: ${JSON.stringify(chunk)}\n\n`);
-              } else if (!suppressSecondTurn) {
+              } else {
                 emitTextDelta("\n\n");
               }
             }
 
-            // --- content_block_start: begin tool_use capture ---
+            // --- content_block_start: track tool_use blocks ---
             if (event.type === "content_block_start") {
               const block = event.content_block as Record<string, unknown> | undefined;
               if (block?.type === "tool_use") {
-                const rawId = (block.id as string) ?? "";
-                const callId = rawId.startsWith("toolu_")
-                  ? `call_${rawId.slice(6)}`
-                  : rawId || `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+                inToolUseBlock = true;
+                turnHadToolUse = true;
                 const toolName = stripMcpPrefix((block.name as string) ?? "");
-                const toolIndex = nativeToolCalls.length;
-                currentToolUse = { id: callId, name: toolName, index: toolIndex };
-                currentToolArgBuffer = "";
+                nativeToolCalls.push({ id: (block.id as string) ?? "", name: toolName });
 
                 if (process.env.DEBUG_SDK) {
-                  console.log("[SDK:tool_use:start]", JSON.stringify({ id: callId, name: toolName, rawId, rawName: block.name }));
+                  console.log("[SDK:tool_use:start]", JSON.stringify({ name: toolName, rawName: block.name }));
                 }
               }
             }
 
-            // --- content_block_delta: buffer tool args or stream text ---
+            // --- content_block_delta: keepalive during tool args, stream text ---
             if (event.type === "content_block_delta") {
               const delta = event.delta as Record<string, unknown>;
-              if (delta?.type === "input_json_delta" && currentToolUse) {
-                const fragment = (delta.partial_json as string) ?? "";
-                if (fragment) {
-                  currentToolArgBuffer += fragment;
-                }
+              if (delta?.type === "input_json_delta" && inToolUseBlock) {
                 safeEnqueue(": keepalive\n\n");
-              } else if (delta?.type === "text_delta" && delta.text && !suppressSecondTurn) {
+              } else if (delta?.type === "text_delta" && delta.text) {
                 feedText(delta.text as string);
               }
             }
 
-            // --- content_block_stop: two-phase tool_call emission ---
-            // Both phases emitted back-to-back so the client can't
-            // execute between them with empty arguments.
+            // --- content_block_stop: reset tool_use tracking ---
             if (event.type === "content_block_stop") {
-              if (currentToolUse) {
-                const completeArgs = currentToolArgBuffer || "{}";
-
-                // Phase 1: register the tool call (id + name + empty args)
-                const initChunk: OpenAIStreamChunk = {
-                  id: requestId,
-                  object: "chat.completion.chunk",
-                  created: nowUnix(),
-                  model,
-                  choices: [{
-                    index: 0,
-                    delta: {
-                      tool_calls: [{
-                        index: currentToolUse.index,
-                        id: currentToolUse.id,
-                        type: "function",
-                        function: { name: currentToolUse.name, arguments: "" },
-                      }],
-                    },
-                    logprobs: null,
-                    finish_reason: null,
-                  }],
-                };
-                safeEnqueue(`data: ${JSON.stringify(initChunk)}\n\n`);
-
-                // Phase 2: deliver complete arguments (immediately after)
-                const argChunk: OpenAIStreamChunk = {
-                  id: requestId,
-                  object: "chat.completion.chunk",
-                  created: nowUnix(),
-                  model,
-                  choices: [{
-                    index: 0,
-                    delta: {
-                      tool_calls: [{
-                        index: currentToolUse.index,
-                        function: { arguments: completeArgs },
-                      }],
-                    },
-                    logprobs: null,
-                    finish_reason: null,
-                  }],
-                };
-                safeEnqueue(`data: ${JSON.stringify(argChunk)}\n\n`);
-
-                nativeToolCalls.push({
-                  id: currentToolUse.id,
-                  name: currentToolUse.name,
-                });
+              if (inToolUseBlock) {
+                inToolUseBlock = false;
                 if (process.env.DEBUG_SDK) {
-                  console.log("[SDK:tool_use:complete]", JSON.stringify({ id: currentToolUse.id, name: currentToolUse.name, argLen: completeArgs.length }));
+                  const last = nativeToolCalls[nativeToolCalls.length - 1];
+                  console.log("[SDK:tool_use:complete]", JSON.stringify(last));
                 }
-                currentToolUse = null;
-                currentToolArgBuffer = "";
               }
             }
 
-            // --- message_delta: flush pending + capture usage ---
+            // --- message_delta: flush pending + capture usage + keepalive ---
             if (event.type === "message_delta") {
-              if (!suppressSecondTurn) flushPending();
+              flushPending();
               lastUsage = (event.usage as Record<string, number> | undefined) ?? lastUsage;
+              // If this turn involved tool calls, the SDK will execute the
+              // handler and make another API call.  Keep the SSE alive.
+              if (turnHadToolUse) {
+                startKeepalive();
+              }
             }
           }
 
@@ -382,8 +339,9 @@ export async function createStream(
         }
 
         // All done — flush buffers and emit final chunks.
-        if (!suppressSecondTurn) flushPending();
-        const stopReason = nativeToolCalls.length > 0 ? "tool_calls" : "stop";
+        flushPending();
+        stopKeepalive();
+        const stopReason = "stop";
 
         if (process.env.DEBUG_SDK) {
           console.log("[SDK:emit]", JSON.stringify({ nativeToolCalls: nativeToolCalls.length, toolNames: nativeToolCalls.map(tc => tc.name) }));
@@ -411,12 +369,17 @@ export async function createStream(
         }
         safeClose();
       } catch (err) {
+        stopKeepalive();
         if (!streamClosed) console.error("[SSE:error]", err);
         safeError(err);
       }
     },
     cancel() {
       streamClosed = true;
+      if (keepaliveTimer) {
+        clearInterval(keepaliveTimer);
+        keepaliveTimer = null;
+      }
     },
   });
 }

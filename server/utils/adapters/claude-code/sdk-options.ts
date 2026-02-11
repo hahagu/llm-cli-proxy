@@ -67,10 +67,10 @@ export function buildSdkOptions(
 ) {
   const options: Record<string, unknown> = {
     model: request.model,
-    // Single turn only — the client manages the tool loop via follow-up
-    // requests.  With maxTurns:1 the model produces tool_use blocks but
-    // the SDK stops before executing them, so we can capture and forward.
-    maxTurns: 1,
+    // Allow multi-turn tool execution so the SDK calls MCP tool handlers,
+    // feeds results back to the model, and lets it produce a final text
+    // response — all within a single SSE stream.
+    maxTurns: 4,
     // Disable all built-in SDK tools (Read, Write, Bash, etc.)
     tools: [],
     settingSources: [],
