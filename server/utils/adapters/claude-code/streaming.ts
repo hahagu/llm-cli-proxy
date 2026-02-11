@@ -338,26 +338,30 @@ export async function createStream(
               const delta = event.delta as Record<string, unknown>;
               if (delta?.type === "input_json_delta" && currentToolUse) {
                 stopKeepalive();
-                toolCallsWithArgs.add(currentToolUse.rawId);
                 const fragment = (delta.partial_json as string) ?? "";
-                const argChunk: OpenAIStreamChunk = {
-                  id: requestId,
-                  object: "chat.completion.chunk",
-                  created: nowUnix(),
-                  model,
-                  choices: [{
-                    index: 0,
-                    delta: {
-                      tool_calls: [{
-                        index: currentToolUse.index,
-                        function: { arguments: fragment },
-                      }],
-                    },
-                    logprobs: null,
-                    finish_reason: null,
-                  }],
-                };
-                safeEnqueue(`data: ${JSON.stringify(argChunk)}\n\n`);
+                // Skip empty fragments — the SDK often sends a zero-length
+                // input_json_delta as a "start" signal with no actual data.
+                if (fragment) {
+                  toolCallsWithArgs.add(currentToolUse.rawId);
+                  const argChunk: OpenAIStreamChunk = {
+                    id: requestId,
+                    object: "chat.completion.chunk",
+                    created: nowUnix(),
+                    model,
+                    choices: [{
+                      index: 0,
+                      delta: {
+                        tool_calls: [{
+                          index: currentToolUse.index,
+                          function: { arguments: fragment },
+                        }],
+                      },
+                      logprobs: null,
+                      finish_reason: null,
+                    }],
+                  };
+                  safeEnqueue(`data: ${JSON.stringify(argChunk)}\n\n`);
+                }
               } else if (delta?.type === "text_delta" && delta.text) {
                 feedText(delta.text as string);
               }
