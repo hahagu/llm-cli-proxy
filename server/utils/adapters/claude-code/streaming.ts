@@ -97,6 +97,23 @@ export async function createStream(
         try { controller.error(err); } catch { /* already closed */ }
       }
 
+      /** Send SSE comments as keepalive during tool_use gaps.
+       *  SSE comments (lines starting with `:`) carry no data payload
+       *  so they won't interfere with LobeChat's argument parsing,
+       *  but they keep the TCP connection alive. */
+      function startToolKeepalive() {
+        if (keepaliveTimer) return;
+        keepaliveTimer = setInterval(() => {
+          safeEnqueue(": keepalive\n\n");
+        }, 5_000);
+      }
+      function stopToolKeepalive() {
+        if (keepaliveTimer) {
+          clearInterval(keepaliveTimer);
+          keepaliveTimer = null;
+        }
+      }
+
       try {
         let sentRole = false;
 
@@ -110,23 +127,6 @@ export async function createStream(
         // --- Native tool_use tracking ---
         const nativeToolCalls: Array<{ id: string; name: string }> = [];
         let currentToolUse: { id: string; name: string; index: number } | null = null;
-
-        /** Send SSE comments as keepalive during tool_use gaps.
-         *  SSE comments (lines starting with `:`) carry no data payload
-         *  so they won't interfere with LobeChat's argument parsing,
-         *  but they keep the TCP connection alive. */
-        function startToolKeepalive() {
-          if (keepaliveTimer) return;
-          keepaliveTimer = setInterval(() => {
-            safeEnqueue(": keepalive\n\n");
-          }, 5_000);
-        }
-        function stopToolKeepalive() {
-          if (keepaliveTimer) {
-            clearInterval(keepaliveTimer);
-            keepaliveTimer = null;
-          }
-        }
 
         function emitThinkingDelta(text: string) {
           if (!text) return;
@@ -303,7 +303,7 @@ export async function createStream(
                         index: toolIndex,
                         id: callId,
                         type: "function",
-                        function: { name: toolName, arguments: "" },
+                        function: { name: toolName },
                       }],
                     },
                     logprobs: null,
