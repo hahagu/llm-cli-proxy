@@ -106,17 +106,40 @@ export function buildThinkingPrompt(mode: ThinkingMode, effort: ThinkingEffort):
   );
 }
 
-/** Extract thinking content from text that uses <thinking>...</thinking> tags. */
+/**
+ * Extract all <thinking>...</thinking> blocks from text, regardless of
+ * position.  Returns concatenated thinking content and the remaining
+ * text with all thinking blocks removed.
+ */
 export function extractThinkingFromText(text: string): {
   thinking: string;
   content: string;
 } {
-  const match = text.match(/^[\s]*<thinking>([\s\S]*?)<\/thinking>([\s\S]*)$/);
-  if (!match) {
-    return { thinking: "", content: text };
+  let thinking = "";
+  let content = "";
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    const openIdx = remaining.indexOf("<thinking>");
+    if (openIdx === -1) {
+      content += remaining;
+      break;
+    }
+    content += remaining.slice(0, openIdx);
+    remaining = remaining.slice(openIdx + "<thinking>".length);
+
+    const closeIdx = remaining.indexOf("</thinking>");
+    if (closeIdx === -1) {
+      // Unclosed tag — treat remainder as thinking
+      thinking += (thinking ? "\n\n" : "") + remaining;
+      break;
+    }
+    thinking += (thinking ? "\n\n" : "") + remaining.slice(0, closeIdx);
+    remaining = remaining.slice(closeIdx + "</thinking>".length);
   }
+
   return {
-    thinking: match[1]!.trim(),
-    content: match[2]!.trim(),
+    thinking: thinking.trim(),
+    content: content.trim(),
   };
 }

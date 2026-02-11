@@ -137,13 +137,13 @@ export async function createStream(
         let sentRole = true;
 
         // --- Thinking tag detection state machine ---
+        // Scans for <thinking>...</thinking> tags anywhere in the text
+        // stream.  Cycles between "scanning" (emitting content) and
+        // "in_thinking" (emitting reasoning_content).
         const OPEN_TAG = "<thinking>";
         const CLOSE_TAG = "</thinking>";
-        type ThinkingState = "detect_start" | "in_thinking" | "in_content" | "passthrough";
-        // Always detect thinking tags — even when not requested, the model
-        // may produce them spontaneously.  We strip them from content and
-        // only route to reasoning_content when the user actually asked.
-        let thinkingState: ThinkingState = "detect_start";
+        type ThinkingState = "scanning" | "in_thinking";
+        let thinkingState: ThinkingState = "scanning";
         let tagBuffer = "";
 
         // --- Native tool_use tracking ---
@@ -234,74 +234,67 @@ export async function createStream(
           safeEnqueue(`data: ${JSON.stringify(chunk)}\n\n`);
         }
 
+        /**
+         * Return how many leading chars of `buffer` can be safely
+         * emitted — i.e. the tail cannot be the start of `tag`.
+         */
+        function safeLength(buffer: string, tag: string): number {
+          for (let len = Math.min(tag.length - 1, buffer.length); len > 0; len--) {
+            if (tag.startsWith(buffer.slice(buffer.length - len))) {
+              return buffer.length - len;
+            }
+          }
+          return buffer.length;
+        }
+
         /** Process incoming text through thinking tag detection. */
         function feedText(incoming: string) {
-          if (thinkingState === "passthrough") {
-            emitTextDelta(incoming);
-            return;
-          }
+          tagBuffer += incoming;
 
-          if (thinkingState === "detect_start") {
-            tagBuffer += incoming;
-            const trimmed = tagBuffer.trimStart();
-            if (trimmed.length >= OPEN_TAG.length) {
-              if (trimmed.startsWith(OPEN_TAG)) {
+          while (tagBuffer.length > 0) {
+            if (thinkingState === "scanning") {
+              const idx = tagBuffer.indexOf(OPEN_TAG);
+              if (idx !== -1) {
+                emitTextDelta(tagBuffer.slice(0, idx));
+                tagBuffer = tagBuffer.slice(idx + OPEN_TAG.length);
                 thinkingState = "in_thinking";
-                const afterTag = trimmed.slice(OPEN_TAG.length);
-                tagBuffer = "";
-                if (afterTag) feedText(afterTag);
-              } else {
-                thinkingState = "passthrough";
-                const buf = tagBuffer;
-                tagBuffer = "";
-                emitTextDelta(buf);
+                continue;
               }
-            } else if (trimmed.length > 0 && !OPEN_TAG.startsWith(trimmed)) {
-              thinkingState = "passthrough";
-              const buf = tagBuffer;
-              tagBuffer = "";
-              emitTextDelta(buf);
-            }
-            return;
-          }
-
-          if (thinkingState === "in_thinking") {
-            tagBuffer += incoming;
-            const closeIdx = tagBuffer.indexOf(CLOSE_TAG);
-            if (closeIdx !== -1) {
-              const thinkingContent = tagBuffer.slice(0, closeIdx);
-              const afterTag = tagBuffer.slice(closeIdx + CLOSE_TAG.length);
-              tagBuffer = "";
-              thinkingState = "in_content";
-              emitThinkingDelta(thinkingContent);
-              if (afterTag) feedText(afterTag);
-            } else {
-              const safeLen = tagBuffer.length - (CLOSE_TAG.length - 1);
-              if (safeLen > 0) {
-                emitThinkingDelta(tagBuffer.slice(0, safeLen));
-                tagBuffer = tagBuffer.slice(safeLen);
+              // No full tag — emit chars that can't be a partial match
+              const safe = safeLength(tagBuffer, OPEN_TAG);
+              if (safe > 0) {
+                emitTextDelta(tagBuffer.slice(0, safe));
+                tagBuffer = tagBuffer.slice(safe);
               }
+              break;
             }
-            return;
-          }
 
-          if (thinkingState === "in_content") {
-            emitTextDelta(incoming);
-            return;
+            if (thinkingState === "in_thinking") {
+              const idx = tagBuffer.indexOf(CLOSE_TAG);
+              if (idx !== -1) {
+                emitThinkingDelta(tagBuffer.slice(0, idx));
+                tagBuffer = tagBuffer.slice(idx + CLOSE_TAG.length);
+                thinkingState = "scanning";
+                continue;
+              }
+              const safe = safeLength(tagBuffer, CLOSE_TAG);
+              if (safe > 0) {
+                emitThinkingDelta(tagBuffer.slice(0, safe));
+                tagBuffer = tagBuffer.slice(safe);
+              }
+              break;
+            }
           }
         }
 
         function flushPending() {
-          if (tagBuffer) {
-            if (thinkingState === "in_thinking" || thinkingState === "detect_start") {
-              if (thinkingState === "in_thinking") {
-                emitThinkingDelta(tagBuffer);
-              } else {
-                emitTextDelta(tagBuffer);
-              }
-            }
-            tagBuffer = "";
+          if (!tagBuffer) return;
+          if (thinkingState === "in_thinking") {
+            emitThinkingDelta(tagBuffer);
+          } else {
+            emitTextDelta(tagBuffer);
           }
+          tagBuffer = "";
         }
 
         // Track usage across turns for the final chunk.
