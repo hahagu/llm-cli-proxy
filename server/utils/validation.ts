@@ -83,10 +83,8 @@ export const chatCompletionRequestSchema = z.object({
     })
     .passthrough()
     .optional(),
-  output_config: z
-    .object({
-      effort: z.enum(["low", "medium", "high", "max"]).optional(),
-    })
+  reasoning_effort: z
+    .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
     .optional(),
 }).passthrough();
 

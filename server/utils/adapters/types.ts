@@ -56,6 +56,9 @@ export interface OpenAIChatRequest {
   user?: string;
   stream_options?: { include_usage?: boolean };
   thinking?: { type?: string; budget_tokens?: number; [key: string]: unknown };
+  // OpenAI-standard reasoning effort
+  reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  // Custom: adapters may also read this (passthrough from .passthrough())
   output_config?: { effort?: "low" | "medium" | "high" | "max" };
 }
 

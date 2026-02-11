@@ -15,23 +15,40 @@ export type ThinkingMode = "off" | "forced" | "adaptive";
 /** Effort level for thinking depth. */
 export type ThinkingEffort = "low" | "medium" | "high" | "max";
 
+/** Map OpenAI reasoning_effort values to our internal effort levels. */
+const OPENAI_EFFORT_MAP: Record<string, ThinkingEffort> = {
+  minimal: "low",
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "max",
+};
+
 /** Resolve thinking mode from request parameters. */
 export function resolveThinkingMode(request: OpenAIChatRequest): ThinkingMode {
-  // Explicit Anthropic-style thinking
+  // Explicit thinking.type takes priority
   if (request.thinking?.type === "enabled") return "forced";
   if (request.thinking?.type === "adaptive") return "adaptive";
   if (request.thinking?.type === "disabled") return "off";
 
-  // output_config.effort implies forced thinking
+  // Custom output_config.effort implies forced thinking
   if (request.output_config?.effort) return "forced";
+
+  // OpenAI reasoning_effort implies forced thinking (unless "none")
+  if (request.reasoning_effort && request.reasoning_effort !== "none") return "forced";
 
   return "off";
 }
 
 /** Resolve effort level from request. */
 export function resolveThinkingEffort(request: OpenAIChatRequest): ThinkingEffort {
+  // Custom output_config.effort takes priority
   if (request.output_config?.effort) {
     return request.output_config.effort;
+  }
+  // Fall back to OpenAI reasoning_effort with value mapping
+  if (request.reasoning_effort && request.reasoning_effort !== "none") {
+    return OPENAI_EFFORT_MAP[request.reasoning_effort] ?? "medium";
   }
   return "medium";
 }
