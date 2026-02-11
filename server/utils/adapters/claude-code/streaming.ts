@@ -5,8 +5,8 @@
  * stream events into OpenAI-compatible SSE chunks. Handles:
  *
  * - Text delta streaming (including thinking tag detection)
- * - Two-phase tool_call emission (Phase 1: id/name, Phase 2: args)
- * - Standard OpenAI tool_call streaming (init chunk + arg fragments)
+ * - Deferred tool_call emission (init sent with first real arg fragment)
+ * - Assistant message backfill for tool calls with no streamed args
  * - Usage reporting and graceful client disconnection
  */
 
@@ -123,12 +123,33 @@ export async function createStream(
         let tagBuffer = "";
 
         // --- Native tool_use tracking ---
-        const nativeToolCalls: Array<{ rawId: string; id: string; name: string; index: number }> = [];
-        let currentToolUse: { rawId: string; id: string; name: string; index: number } | null = null;
-        // Track which tool calls received at least one input_json_delta.
-        // Tool calls NOT in this set need args backfilled from the
-        // assistant message.
-        const toolCallsWithArgs = new Set<string>();
+        // All tool calls seen so far (across all turns).
+        const nativeToolCalls: Array<{ rawId: string; id: string; name: string; index: number; emitted: boolean }> = [];
+        let currentToolUse: { rawId: string; id: string; name: string; index: number; emitted: boolean } | null = null;
+
+        /** Emit the OpenAI init chunk (id/type/name + arguments) for a tool call. */
+        function emitToolCallInit(tc: { id: string; name: string; index: number }, args: string) {
+          const chunk: OpenAIStreamChunk = {
+            id: requestId,
+            object: "chat.completion.chunk",
+            created: nowUnix(),
+            model,
+            choices: [{
+              index: 0,
+              delta: {
+                tool_calls: [{
+                  index: tc.index,
+                  id: tc.id,
+                  type: "function",
+                  function: { name: tc.name, arguments: args },
+                }],
+              },
+              logprobs: null,
+              finish_reason: null,
+            }],
+          };
+          safeEnqueue(`data: ${JSON.stringify(chunk)}\n\n`);
+        }
 
         function emitThinkingDelta(text: string) {
           if (!text) return;
@@ -302,29 +323,10 @@ export async function createStream(
                   : rawId || `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
                 const toolName = stripMcpPrefix((block.name as string) ?? "");
                 const toolIndex = nativeToolCalls.length;
-                currentToolUse = { rawId, id: callId, name: toolName, index: toolIndex };
-
-                // Standard OpenAI init chunk: id/type/name + arguments: ""
-                const initChunk: OpenAIStreamChunk = {
-                  id: requestId,
-                  object: "chat.completion.chunk",
-                  created: nowUnix(),
-                  model,
-                  choices: [{
-                    index: 0,
-                    delta: {
-                      tool_calls: [{
-                        index: toolIndex,
-                        id: callId,
-                        type: "function",
-                        function: { name: toolName, arguments: "" },
-                      }],
-                    },
-                    logprobs: null,
-                    finish_reason: null,
-                  }],
-                };
-                safeEnqueue(`data: ${JSON.stringify(initChunk)}\n\n`);
+                currentToolUse = { rawId, id: callId, name: toolName, index: toolIndex, emitted: false };
+                // Don't emit init yet — defer until first non-empty
+                // arg fragment so LobeChat never sees a tool call
+                // without argument data.  Keepalive bridges the gap.
                 startKeepalive();
 
                 if (process.env.DEBUG_SDK) {
@@ -339,10 +341,14 @@ export async function createStream(
               if (delta?.type === "input_json_delta" && currentToolUse) {
                 stopKeepalive();
                 const fragment = (delta.partial_json as string) ?? "";
-                // Skip empty fragments — the SDK often sends a zero-length
-                // input_json_delta as a "start" signal with no actual data.
-                if (fragment) {
-                  toolCallsWithArgs.add(currentToolUse.rawId);
+                if (!fragment) {
+                  // Skip empty fragments (SDK "start" signal).
+                } else if (!currentToolUse.emitted) {
+                  // First real data — emit init + first arg together.
+                  currentToolUse.emitted = true;
+                  emitToolCallInit(currentToolUse, fragment);
+                } else {
+                  // Subsequent fragments — just the args.
                   const argChunk: OpenAIStreamChunk = {
                     id: requestId,
                     object: "chat.completion.chunk",
@@ -376,9 +382,12 @@ export async function createStream(
                   id: currentToolUse.id,
                   name: currentToolUse.name,
                   index: currentToolUse.index,
+                  emitted: currentToolUse.emitted,
                 });
                 if (process.env.DEBUG_SDK) {
-                  console.log("[SDK:tool_use:complete]", JSON.stringify({ id: currentToolUse.id, name: currentToolUse.name }));
+                  console.log("[SDK:tool_use:complete]", JSON.stringify({
+                    id: currentToolUse.id, name: currentToolUse.name, emitted: currentToolUse.emitted,
+                  }));
                 }
                 currentToolUse = null;
               }
@@ -392,52 +401,27 @@ export async function createStream(
           }
 
           // --- assistant message: backfill args for tool calls that
-          //     never received input_json_delta events ---
+          //     were never emitted (no non-empty input_json_delta) ---
           if (message.type === "assistant") {
             const blocks = ((message as any).message?.content ?? []) as Array<Record<string, unknown>>;
             if (process.env.DEBUG_SDK) {
               const toolUseBlocks = blocks.filter((b) => b.type === "tool_use");
+              const pending = nativeToolCalls.filter((t) => !t.emitted);
               console.log("[SDK:assistant:backfill-check]", JSON.stringify({
-                totalBlocks: blocks.length,
                 toolUseBlocks: toolUseBlocks.length,
-                trackedToolCalls: nativeToolCalls.length,
-                withArgs: [...toolCallsWithArgs],
+                pendingToolCalls: pending.map((t) => t.rawId),
                 toolUseIds: toolUseBlocks.map((b) => b.id),
-                trackedRawIds: nativeToolCalls.map((t) => t.rawId),
-                toolUseInputKeys: toolUseBlocks.map((b) => b.input ? Object.keys(b.input as object) : null),
               }));
             }
             for (const block of blocks) {
               if (block.type !== "tool_use") continue;
               const rawId = block.id as string;
-              if (toolCallsWithArgs.has(rawId)) continue;
-              // Find matching tracked tool call
-              const tc = nativeToolCalls.find((t) => t.rawId === rawId);
-              if (!tc) {
-                if (process.env.DEBUG_SDK) {
-                  console.log("[SDK:assistant:no-match]", JSON.stringify({ rawId, trackedRawIds: nativeToolCalls.map((t) => t.rawId) }));
-                }
-                continue;
-              }
+              // Match against tracked tool calls that haven't been emitted
+              const tc = nativeToolCalls.find((t) => t.rawId === rawId && !t.emitted);
+              if (!tc) continue;
+              tc.emitted = true;
               const argsStr = JSON.stringify(block.input ?? {});
-              const argChunk: OpenAIStreamChunk = {
-                id: requestId,
-                object: "chat.completion.chunk",
-                created: nowUnix(),
-                model,
-                choices: [{
-                  index: 0,
-                  delta: {
-                    tool_calls: [{
-                      index: tc.index,
-                      function: { arguments: argsStr },
-                    }],
-                  },
-                  logprobs: null,
-                  finish_reason: null,
-                }],
-              };
-              safeEnqueue(`data: ${JSON.stringify(argChunk)}\n\n`);
+              emitToolCallInit(tc, argsStr);
               if (process.env.DEBUG_SDK) {
                 console.log("[SDK:tool_use:backfill]", JSON.stringify({ id: tc.id, rawId, argsLen: argsStr.length }));
               }
@@ -459,6 +443,20 @@ export async function createStream(
         // All done — flush buffers and emit final chunks.
         stopKeepalive();
         flushPending();
+
+        // Safety net: emit any tool calls that never got args from
+        // streaming or the assistant message (emit with empty args
+        // so LobeChat at least sees the tool call).
+        for (const tc of nativeToolCalls) {
+          if (!tc.emitted) {
+            tc.emitted = true;
+            emitToolCallInit(tc, "{}");
+            if (process.env.DEBUG_SDK) {
+              console.log("[SDK:tool_use:fallback]", JSON.stringify({ id: tc.id, name: tc.name }));
+            }
+          }
+        }
+
         const stopReason = nativeToolCalls.length > 0 ? "tool_calls" : "stop";
 
         if (process.env.DEBUG_SDK) {
