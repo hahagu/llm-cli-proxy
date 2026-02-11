@@ -118,9 +118,9 @@ export async function createStream(
         startKeepalive();
 
         // Send the role chunk immediately so the client knows the
-        // response is active.  Without this, follow-up requests that
-        // fail before message_start produce an empty 200 body and the
-        // client's loading indicator persists forever.
+        // response is active.  Intentionally omit `content` — setting
+        // it to "" can cause clients (e.g. LobeChat) to treat the
+        // response as text-only and skip the tool-calling loop.
         const roleChunk: OpenAIStreamChunk = {
           id: requestId,
           object: "chat.completion.chunk",
@@ -128,7 +128,7 @@ export async function createStream(
           model,
           choices: [{
             index: 0,
-            delta: { role: "assistant", content: "" },
+            delta: { role: "assistant" },
             logprobs: null,
             finish_reason: null,
           }],
@@ -148,9 +148,17 @@ export async function createStream(
         const nativeToolCalls: Array<{ rawId: string; id: string; name: string; index: number; emitted: boolean }> = [];
         let currentToolUse: { rawId: string; id: string; name: string; index: number; emitted: boolean } | null = null;
 
-        /** Emit the OpenAI init chunk (id/type/name + arguments) for a tool call. */
+        /**
+         * Emit the OpenAI init chunk for a tool call.
+         *
+         * Matches the standard OpenAI format: the init has
+         * id/type/name with arguments:"", then the actual args are
+         * sent as a separate delta chunk.  Some clients (LobeChat)
+         * rely on this exact split to enter the tool-calling loop.
+         */
         function emitToolCallInit(tc: { id: string; name: string; index: number }, args: string) {
-          const chunk: OpenAIStreamChunk = {
+          // Init chunk — id, type, name, arguments: ""
+          const initChunk: OpenAIStreamChunk = {
             id: requestId,
             object: "chat.completion.chunk",
             created: nowUnix(),
@@ -162,14 +170,39 @@ export async function createStream(
                   index: tc.index,
                   id: tc.id,
                   type: "function",
-                  function: { name: tc.name, arguments: args },
+                  function: { name: tc.name, arguments: "" },
                 }],
               },
               logprobs: null,
               finish_reason: null,
             }],
           };
-          safeEnqueue(`data: ${JSON.stringify(chunk)}\n\n`);
+          safeEnqueue(`data: ${JSON.stringify(initChunk)}\n\n`);
+          if (process.env.DEBUG_SDK) {
+            console.log("[SSE:tool_init]", JSON.stringify({ index: tc.index, id: tc.id, name: tc.name, argsLen: args.length }));
+          }
+
+          // First arg fragment as a separate delta (standard format)
+          if (args) {
+            const argChunk: OpenAIStreamChunk = {
+              id: requestId,
+              object: "chat.completion.chunk",
+              created: nowUnix(),
+              model,
+              choices: [{
+                index: 0,
+                delta: {
+                  tool_calls: [{
+                    index: tc.index,
+                    function: { arguments: args },
+                  }],
+                },
+                logprobs: null,
+                finish_reason: null,
+              }],
+            };
+            safeEnqueue(`data: ${JSON.stringify(argChunk)}\n\n`);
+          }
         }
 
         function emitThinkingDelta(text: string) {
@@ -501,9 +534,11 @@ export async function createStream(
               (lastUsage.input_tokens ?? 0) + (lastUsage.output_tokens ?? 0),
           };
         }
-        safeEnqueue(`data: ${JSON.stringify(finishChunk)}\n\n`);
+        const finishData = `data: ${JSON.stringify(finishChunk)}\n\n`;
+        safeEnqueue(finishData);
         safeEnqueue("data: [DONE]\n\n");
         if (process.env.DEBUG_SDK) {
+          console.log("[SSE:finish]", finishData.trim());
           console.log("[SSE:done]", JSON.stringify({ requestId, stopReason, toolCalls: nativeToolCalls.length }));
         }
         safeClose();
