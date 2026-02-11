@@ -6,7 +6,7 @@
  *
  * - Text delta streaming (including thinking tag detection)
  * - Two-phase tool_call emission (Phase 1: id/name, Phase 2: args)
- * - SSE keepalive during argument buffering
+ * - Deferred tool_call init (sent with first arg fragment)
  * - Usage reporting and graceful client disconnection
  */
 
@@ -76,7 +76,6 @@ export async function createStream(
   });
 
   let streamClosed = false;
-  let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 
   return new ReadableStream<string>({
     async start(controller) {
@@ -95,23 +94,6 @@ export async function createStream(
         if (streamClosed) return;
         streamClosed = true;
         try { controller.error(err); } catch { /* already closed */ }
-      }
-
-      /** Send SSE comments as keepalive during tool_use gaps.
-       *  SSE comments (lines starting with `:`) carry no data payload
-       *  so they won't interfere with LobeChat's argument parsing,
-       *  but they keep the TCP connection alive. */
-      function startToolKeepalive() {
-        if (keepaliveTimer) return;
-        keepaliveTimer = setInterval(() => {
-          safeEnqueue(": keepalive\n\n");
-        }, 5_000);
-      }
-      function stopToolKeepalive() {
-        if (keepaliveTimer) {
-          clearInterval(keepaliveTimer);
-          keepaliveTimer = null;
-        }
       }
 
       try {
@@ -288,12 +270,6 @@ export async function createStream(
                 const toolIndex = nativeToolCalls.length;
                 currentToolUse = { id: callId, name: toolName, index: toolIndex, sentInit: false };
 
-                // Don't emit an init chunk yet — defer it until the first
-                // arg fragment arrives so LobeChat never sees a tool call
-                // header without accompanying argument data.  SSE comment
-                // keepalives keep the connection alive in the meantime.
-                startToolKeepalive();
-
                 if (process.env.DEBUG_SDK) {
                   console.log("[SDK:tool_use:start]", JSON.stringify({ id: callId, name: toolName, rawId, rawName: block.name }));
                 }
@@ -304,8 +280,6 @@ export async function createStream(
             if (event.type === "content_block_delta") {
               const delta = event.delta as Record<string, unknown>;
               if (delta?.type === "input_json_delta" && currentToolUse) {
-                // Real arg data is flowing — no need for keepalive.
-                stopToolKeepalive();
                 const fragment = (delta.partial_json as string) ?? "";
 
                 // First fragment: send init info (id/type/name) together
@@ -343,7 +317,6 @@ export async function createStream(
             // --- content_block_stop: finalize tool_use, signal completion ---
             if (event.type === "content_block_stop") {
               if (currentToolUse) {
-                stopToolKeepalive();
                 nativeToolCalls.push({
                   id: currentToolUse.id,
                   name: currentToolUse.name,
@@ -377,7 +350,6 @@ export async function createStream(
         // All done — flush buffers and emit final chunks.
         // Always use "stop" — the client sees tool_calls in the deltas
         // and handles them without needing finish_reason "tool_calls".
-        stopToolKeepalive();
         flushPending();
         const stopReason = "stop";
 
@@ -407,17 +379,12 @@ export async function createStream(
         }
         safeClose();
       } catch (err) {
-        stopToolKeepalive();
         if (!streamClosed) console.error("[SSE:error]", err);
         safeError(err);
       }
     },
     cancel() {
       streamClosed = true;
-      if (keepaliveTimer) {
-        clearInterval(keepaliveTimer);
-        keepaliveTimer = null;
-      }
     },
   });
 }
