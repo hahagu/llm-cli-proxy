@@ -98,7 +98,7 @@ export async function createStream(
       }
 
       // SSE comment keepalive — keeps the TCP connection alive during
-      // gaps between content_block_start and the first arg fragment.
+      // silent periods (SDK tool execution, inter-turn gaps, etc.).
       function startKeepalive() {
         if (keepaliveTimer) return;
         keepaliveTimer = setInterval(() => {
@@ -113,6 +113,9 @@ export async function createStream(
       }
 
       try {
+        // Start keepalive immediately — the SDK may take time before
+        // emitting the first event (MCP server init, model warm-up).
+        startKeepalive();
         let sentRole = false;
 
         // --- Thinking tag detection state machine ---
@@ -326,8 +329,7 @@ export async function createStream(
                 currentToolUse = { rawId, id: callId, name: toolName, index: toolIndex, emitted: false };
                 // Don't emit init yet — defer until first non-empty
                 // arg fragment so LobeChat never sees a tool call
-                // without argument data.  Keepalive bridges the gap.
-                startKeepalive();
+                // without argument data.
 
                 if (process.env.DEBUG_SDK) {
                   console.log("[SDK:tool_use:start]", JSON.stringify({ id: callId, name: toolName, rawId, rawName: block.name }));
@@ -375,10 +377,9 @@ export async function createStream(
               }
             }
 
-            // --- content_block_stop: finalize tool_use, signal completion ---
+            // --- content_block_stop: finalize tool_use ---
             if (event.type === "content_block_stop") {
               if (currentToolUse) {
-                stopKeepalive();
                 nativeToolCalls.push({
                   rawId: currentToolUse.rawId,
                   id: currentToolUse.id,
@@ -439,6 +440,10 @@ export async function createStream(
                 `Claude Code error: ${errors?.join("; ") || message.subtype}`,
               );
             }
+            // The result is the SDK's final message — break immediately
+            // so we don't hang if the generator yields more events
+            // (e.g. during internal MCP tool execution after maxTurns).
+            break;
           }
         }
 

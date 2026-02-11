@@ -67,9 +67,9 @@ export function buildSdkOptions(
 ) {
   const options: Record<string, unknown> = {
     model: request.model,
-    // Single turn — the model produces tool_use blocks but the SDK stops
-    // before executing them.  The proxy streams the tool_call tokens to
-    // the client and always ends with finish_reason "stop".
+    // Single turn — the model proposes tool calls but the SDK should stop
+    // before executing them.  The proxy streams tool_call chunks to the
+    // client, which handles the tool-calling loop itself.
     maxTurns: 1,
     // Disable native extended thinking — we handle thinking via prompt-based
     // <thinking> tags and extract it ourselves (see thinking.ts).
