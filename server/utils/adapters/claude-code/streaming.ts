@@ -76,6 +76,7 @@ export async function createStream(
   });
 
   let streamClosed = false;
+  let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 
   return new ReadableStream<string>({
     async start(controller) {
@@ -109,6 +110,38 @@ export async function createStream(
         // --- Native tool_use tracking ---
         const nativeToolCalls: Array<{ id: string; name: string }> = [];
         let currentToolUse: { id: string; name: string; index: number } | null = null;
+
+        /** Send empty-args deltas as keepalive during tool_use gaps. */
+        function startToolKeepalive() {
+          if (keepaliveTimer || !currentToolUse) return;
+          const tu = currentToolUse;
+          keepaliveTimer = setInterval(() => {
+            const chunk: OpenAIStreamChunk = {
+              id: requestId,
+              object: "chat.completion.chunk",
+              created: nowUnix(),
+              model,
+              choices: [{
+                index: 0,
+                delta: {
+                  tool_calls: [{
+                    index: tu.index,
+                    function: { arguments: "" },
+                  }],
+                },
+                logprobs: null,
+                finish_reason: null,
+              }],
+            };
+            safeEnqueue(`data: ${JSON.stringify(chunk)}\n\n`);
+          }, 5_000);
+        }
+        function stopToolKeepalive() {
+          if (keepaliveTimer) {
+            clearInterval(keepaliveTimer);
+            keepaliveTimer = null;
+          }
+        }
 
         function emitThinkingDelta(text: string) {
           if (!text) return;
@@ -293,6 +326,9 @@ export async function createStream(
                   }],
                 };
                 safeEnqueue(`data: ${JSON.stringify(initChunk)}\n\n`);
+                // Start keepalive in case there's a gap before the first
+                // arg fragment arrives.
+                startToolKeepalive();
 
                 if (process.env.DEBUG_SDK) {
                   console.log("[SDK:tool_use:start]", JSON.stringify({ id: callId, name: toolName, rawId, rawName: block.name }));
@@ -304,9 +340,11 @@ export async function createStream(
             if (event.type === "content_block_delta") {
               const delta = event.delta as Record<string, unknown>;
               if (delta?.type === "input_json_delta" && currentToolUse) {
+                // Real arg data is flowing — no need for keepalive.
+                stopToolKeepalive();
                 const fragment = (delta.partial_json as string) ?? "";
-                // Stream each arg fragment as a real data event (not a
-                // comment) so the client's SSE parser stays engaged.
+                // Stream each arg fragment as a real data event so the
+                // client's SSE parser stays engaged.
                 const argChunk: OpenAIStreamChunk = {
                   id: requestId,
                   object: "chat.completion.chunk",
@@ -330,9 +368,31 @@ export async function createStream(
               }
             }
 
-            // --- content_block_stop: finalize tool_use tracking ---
+            // --- content_block_stop: finalize tool_use, signal completion ---
             if (event.type === "content_block_stop") {
               if (currentToolUse) {
+                stopToolKeepalive();
+                // Emit a final empty-args delta so the client knows this
+                // tool call's arguments are complete.
+                const doneChunk: OpenAIStreamChunk = {
+                  id: requestId,
+                  object: "chat.completion.chunk",
+                  created: nowUnix(),
+                  model,
+                  choices: [{
+                    index: 0,
+                    delta: {
+                      tool_calls: [{
+                        index: currentToolUse.index,
+                        function: { arguments: "" },
+                      }],
+                    },
+                    logprobs: null,
+                    finish_reason: null,
+                  }],
+                };
+                safeEnqueue(`data: ${JSON.stringify(doneChunk)}\n\n`);
+
                 nativeToolCalls.push({
                   id: currentToolUse.id,
                   name: currentToolUse.name,
@@ -366,6 +426,7 @@ export async function createStream(
         // All done — flush buffers and emit final chunks.
         // Always use "stop" — the client sees tool_calls in the deltas
         // and handles them without needing finish_reason "tool_calls".
+        stopToolKeepalive();
         flushPending();
         const stopReason = "stop";
 
@@ -395,12 +456,17 @@ export async function createStream(
         }
         safeClose();
       } catch (err) {
+        stopToolKeepalive();
         if (!streamClosed) console.error("[SSE:error]", err);
         safeError(err);
       }
     },
     cancel() {
       streamClosed = true;
+      if (keepaliveTimer) {
+        clearInterval(keepaliveTimer);
+        keepaliveTimer = null;
+      }
     },
   });
 }
